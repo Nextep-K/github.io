@@ -1,0 +1,10 @@
+name = "context-tourism-pilot-api"
+main = "worker.js"
+compatibility_date = "2026-10-03"
+
+# Secrets are NOT committed.
+# wrangler secret put APP_TOKEN
+# wrangler secret put OPENAI_API_KEY
+# wrangler secret put NOTION_TOKEN
+# wrangler secret put NOTION_PARENT_PAGE_ID
+# Optional: wrangler secret put OPENAI_MODEL
