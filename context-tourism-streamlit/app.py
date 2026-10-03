@@ -268,6 +268,23 @@ def rubric():
     return "반복 패턴","; ".join(f"{k[0]}/{k[1]} ×{v}" for k,v in repeated[:5])
 
 init_state()
+
+# Personal-use access gate. Set APP_PASSCODE in Streamlit Secrets before enabling
+# write-capable integrations such as Notion.
+app_passcode=secret("APP_PASSCODE")
+if app_passcode:
+    if not st.session_state.get("authenticated"):
+        st.title("Context Tourism Pilot")
+        st.caption("개인용 파일럿")
+        entered=st.text_input("Passcode",type="password")
+        if st.button("열기",use_container_width=True):
+            if entered==app_passcode:
+                st.session_state.authenticated=True
+                st.rerun()
+            else:
+                st.error("Passcode가 맞지 않습니다.")
+        st.stop()
+
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
