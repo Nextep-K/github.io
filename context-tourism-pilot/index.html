@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111111" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+  <meta name="apple-mobile-web-app-title" content="ContextPilot" />
+  <title>Context Tourism Pilot</title>
+  <link rel="manifest" href="./manifest.webmanifest" />
+  <link rel="icon" href="./icon.svg" type="image/svg+xml" />
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">PERSONAL PWA PILOT</div>
+        <h1>Context Tourism</h1>
+      </div>
+      <button id="locationBtn" class="icon-btn" aria-label="현재 위치 갱신">◎</button>
+    </header>
+
+    <section class="context-strip" id="contextStrip">
+      <div><span>상태</span><strong id="journeyState">IDLE</strong></div>
+      <div><span>위치</span><strong id="placeLabel">미확인</strong></div>
+      <div><span>목적지</span><strong id="destinationLabel">—</strong></div>
+    </section>
+
+    <main>
+      <section id="chatView" class="view active">
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <div class="quick-actions" id="quickActions">
+          <button data-quick="지금 출발해">출발</button>
+          <button data-quick="도착했어">도착</button>
+          <button data-quick="여기 머무는 중이야">체류</button>
+          <button data-quick="지출했어">지출</button>
+          <button data-quick="이제 어디 갈까">다음 장소</button>
+          <button data-quick="오늘 여행 종료">종료</button>
+        </div>
+      </section>
+
+      <section id="adminView" class="view">
+        <div class="admin-grid">
+          <article class="card">
+            <div class="card-head"><h2>Today</h2><button id="refreshAdminBtn">갱신</button></div>
+            <div id="todaySummary" class="summary"></div>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><h2>Context Trajectory</h2><button id="exportBtn">JSON 내보내기</button></div>
+            <div id="timeline" class="timeline"></div>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><h2>Insight</h2><button id="analyzeBtn">분석</button></div>
+            <div id="insightPanel" class="insight-panel"></div>
+          </article>
+
+          <article class="card">
+            <div class="card-head"><h2>Sync</h2><button id="notionSyncBtn">Notion 동기화</button></div>
+            <div id="syncPanel" class="insight-panel"></div>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <form id="composer" class="composer">
+      <input id="messageInput" autocomplete="off" inputmode="text" placeholder="여행 중 궁금한 것을 말하세요" />
+      <button type="submit">전송</button>
+    </form>
+
+    <nav class="bottom-nav">
+      <button class="nav-btn active" data-view="chatView">대화</button>
+      <button class="nav-btn" data-view="adminView">관리자</button>
+    </nav>
+  </div>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
