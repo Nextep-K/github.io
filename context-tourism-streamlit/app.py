@@ -112,6 +112,9 @@ def state_payload():
     }
 
 def restore_browser_state():
+    if st.session_state.pop("skip_browser_restore",False):
+        st.session_state.browser_restore_done=True
+        return
     if st.session_state.browser_restore_done:
         return
     raw=streamlit_js_eval(
@@ -377,6 +380,9 @@ a,b,c=st.columns(3)
 a.metric("Journey",j["state"])
 b.metric("목적지",j["destination"] or "—")
 c.metric("지출",f'{j["spend_krw"]:,}원')
+ai_ready=bool(secret("OPENAI_API_KEY"))
+notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
+st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · Notion: {"연결됨" if notion_ready else "대기"} · 브라우저 백업: 켜짐')
 
 chat_tab,admin_tab=st.tabs(["대화","관리자"])
 
@@ -417,7 +423,6 @@ with admin_tab:
     st.caption(evidence)
 
     st.subheader("Notion")
-    notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
     if notion_ready:
         if st.button("현재 Journey를 Notion에 저장",use_container_width=True):
             try:
@@ -439,6 +444,7 @@ with admin_tab:
             want_output=False,
             key="CLEAR_BROWSER_STATE",
         )
+        st.session_state.skip_browser_restore=True
         for key in ["messages","events","journey","location","last_location_key","browser_restore_done"]:
             st.session_state.pop(key,None)
         st.rerun()
