@@ -1,0 +1,27 @@
+name: Check Context Tourism Streamlit
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "context-tourism-streamlit/**"
+      - ".github/workflows/context-tourism-streamlit-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r context-tourism-streamlit/requirements.txt
+      - name: Compile
+        run: python -m py_compile context-tourism-streamlit/app.py
+      - name: Import dependencies
+        run: python -c "import streamlit, openai, notion_client, streamlit_js_eval; print('imports ok')"
