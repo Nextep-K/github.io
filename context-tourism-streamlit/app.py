@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 
 import streamlit as st
-from streamlit_js_eval import get_geolocation
+from streamlit_js_eval import get_geolocation, streamlit_js_eval
 
 try:
     from openai import OpenAI
@@ -39,10 +39,44 @@ SYSTEM_PROMPT="""너는 1인용 관광 Context Pilot의 Traveler Agent이자 Obs
 3. 실제 정보를 제공하지 않았다면 Exposure를 만들지 않는다.
 4. 현재 Journey의 시간·공간 맥락을 유지한다.
 5. 필요한 정보가 빠졌으면 짧게 질문한다.
-6. 반드시 아래 JSON 객체 하나만 출력한다. 코드펜스 금지.
-
-{"assistant_text":"응답","events":[{"type":"Intent|Deliberation|Exposure|Choice|Movement|Stay|Transaction","subtype":"식별자","detail":"관찰 내용","explicit_or_inferred":"explicit|inferred","confidence":0.0}],"state_updates":{"state":"IDLE|PLANNING|MOVING|STAYING|ENDED|null","origin":null,"destination":null,"transport":null,"spend_delta":0}}
+6. state_updates의 변경 없는 문자열 값은 빈 문자열로 둔다.
 """
+
+OUTPUT_SCHEMA={
+    "type":"object",
+    "additionalProperties":False,
+    "properties":{
+        "assistant_text":{"type":"string"},
+        "events":{
+            "type":"array",
+            "items":{
+                "type":"object",
+                "additionalProperties":False,
+                "properties":{
+                    "type":{"type":"string","enum":["Intent","Deliberation","Exposure","Choice","Movement","Stay","Transaction"]},
+                    "subtype":{"type":"string"},
+                    "detail":{"type":"string"},
+                    "explicit_or_inferred":{"type":"string","enum":["explicit","inferred"]},
+                    "confidence":{"type":"number","minimum":0,"maximum":1}
+                },
+                "required":["type","subtype","detail","explicit_or_inferred","confidence"]
+            }
+        },
+        "state_updates":{
+            "type":"object",
+            "additionalProperties":False,
+            "properties":{
+                "state":{"type":"string","enum":["","IDLE","PLANNING","MOVING","STAYING","ENDED"]},
+                "origin":{"type":"string"},
+                "destination":{"type":"string"},
+                "transport":{"type":"string"},
+                "spend_delta":{"type":"integer","minimum":0}
+            },
+            "required":["state","origin","destination","transport","spend_delta"]
+        }
+    },
+    "required":["assistant_text","events","state_updates"]
+}
 
 def now_iso():
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -53,6 +87,8 @@ def secret(name, default=None):
     except Exception:
         return default
 
+BROWSER_STATE_KEY="contextTourismPilot.v03"
+
 def init_state():
     defaults={
         "messages":[{"role":"assistant","content":"여행을 시작해 보겠습니다. 지금 어디에 있고, 어디로 가실 예정인가요?"}],
@@ -60,10 +96,47 @@ def init_state():
         "journey":{"id":str(uuid.uuid4()),"state":"IDLE","origin":None,"destination":None,"transport":None,"spend_krw":0,"started_at":None,"ended_at":None},
         "location":None,
         "last_location_key":None,
+        "browser_restore_done":False,
     }
     for k,v in defaults.items():
         if k not in st.session_state:
             st.session_state[k]=v
+
+def state_payload():
+    return {
+        "messages":st.session_state.messages,
+        "events":st.session_state.events,
+        "journey":st.session_state.journey,
+        "location":st.session_state.location,
+        "last_location_key":st.session_state.last_location_key,
+    }
+
+def restore_browser_state():
+    if st.session_state.browser_restore_done:
+        return
+    raw=streamlit_js_eval(
+        js_expressions=f'localStorage.getItem("{BROWSER_STATE_KEY}") || "__EMPTY__"',
+        want_output=True,
+        key="LOAD_BROWSER_STATE",
+    )
+    if raw is None:
+        return
+    st.session_state.browser_restore_done=True
+    if raw=="__EMPTY__":
+        return
+    try:
+        saved=json.loads(raw)
+        if isinstance(saved,dict):
+            for key in ("messages","events","journey","location","last_location_key"):
+                if key in saved:
+                    st.session_state[key]=saved[key]
+    except Exception:
+        pass
+
+def backup_browser_state():
+    payload=json.dumps(state_payload(),ensure_ascii=False,separators=(",",":"))
+    expr=f'localStorage.setItem("{BROWSER_STATE_KEY}", {json.dumps(payload)})'
+    streamlit_js_eval(js_expressions=expr,want_output=False,key="SAVE_BROWSER_STATE")
 
 def snapshot():
     j=st.session_state.journey
@@ -179,6 +252,14 @@ def interpret(text):
             model=secret("OPENAI_MODEL","gpt-6-luna"),
             instructions=SYSTEM_PROMPT,
             input=json.dumps(payload,ensure_ascii=False),
+            text={
+                "format":{
+                    "type":"json_schema",
+                    "name":"tourism_context_result",
+                    "schema":OUTPUT_SCHEMA,
+                    "strict":True
+                }
+            },
         )
         raw=response.output_text.strip()
         raw=re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$","",raw)
@@ -268,6 +349,7 @@ def rubric():
     return "반복 패턴","; ".join(f"{k[0]}/{k[1]} ×{v}" for k,v in repeated[:5])
 
 init_state()
+restore_browser_state()
 
 # Personal-use access gate. Set APP_PASSCODE in Streamlit Secrets before enabling
 # write-capable integrations such as Notion.
@@ -315,6 +397,7 @@ with chat_tab:
         result=interpret(prompt)
         apply_result(result)
         st.session_state.messages.append({"role":"assistant","content":result.get("assistant_text") or "확인했습니다."})
+        backup_browser_state()
         st.rerun()
 
 with admin_tab:
@@ -348,7 +431,14 @@ with admin_tab:
     export={"journey":st.session_state.journey,"location":st.session_state.location,"events":st.session_state.events,"messages":st.session_state.messages}
     st.download_button("JSON 내보내기",data=json.dumps(export,ensure_ascii=False,indent=2),file_name=f'context-journey-{j["id"][:8]}.json',mime="application/json",use_container_width=True)
 
+    backup_browser_state()
+
     if st.button("새 Journey 시작",use_container_width=True):
-        for key in ["messages","events","journey","location","last_location_key"]:
+        streamlit_js_eval(
+            js_expressions=f'localStorage.removeItem("{BROWSER_STATE_KEY}")',
+            want_output=False,
+            key="CLEAR_BROWSER_STATE",
+        )
+        for key in ["messages","events","journey","location","last_location_key","browser_restore_done"]:
             st.session_state.pop(key,None)
         st.rerun()
