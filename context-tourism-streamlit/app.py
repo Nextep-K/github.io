@@ -176,7 +176,7 @@ def interpret(text):
     try:
         client=OpenAI(api_key=key)
         response=client.responses.create(
-            model=secret("OPENAI_MODEL","gpt-5.6"),
+            model=secret("OPENAI_MODEL","gpt-6-luna"),
             instructions=SYSTEM_PROMPT,
             input=json.dumps(payload,ensure_ascii=False),
         )
