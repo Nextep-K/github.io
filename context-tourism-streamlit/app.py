@@ -21,7 +21,9 @@ st.set_page_config(page_title="Context Tourism Pilot", page_icon="🧭", layout=
 st.markdown("""
 <style>
 .block-container{max-width:760px;padding-top:1rem;padding-bottom:5rem}
-div[data-testid="stMetric"]{background:#f5f5f2;padding:10px;border-radius:12px}
+div[data-testid="stMetric"]{background:#1b1f27;padding:10px;border-radius:12px;border:1px solid #303641}
+div[data-testid="stMetric"] [data-testid="stMetricLabel"],
+div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:#f7f8fa!important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -383,9 +385,6 @@ c.metric("지출",f'{j["spend_krw"]:,}원')
 ai_ready=bool(secret("OPENAI_API_KEY"))
 notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
 st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · Notion: {"연결됨" if notion_ready else "대기"} · 브라우저 백업: 켜짐')
-ai_ready=bool(secret("OPENAI_API_KEY"))
-notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
-st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · Notion: {"연결됨" if notion_ready else "대기"} · 브라우저 백업: 켜짐')
 
 chat_tab,admin_tab=st.tabs(["대화","관리자"])
 
@@ -447,7 +446,6 @@ with admin_tab:
             want_output=False,
             key="CLEAR_BROWSER_STATE",
         )
-        st.session_state.skip_browser_restore=True
         st.session_state.skip_browser_restore=True
         for key in ["messages","events","journey","location","last_location_key","browser_restore_done"]:
             st.session_state.pop(key,None)
