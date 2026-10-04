@@ -144,7 +144,7 @@ def init_state():
         "last_audio_digest":None,
         "pending_tts":None,
         "tts_counter":0,
-        "voice_autoplay":True,
+        "voice_autoplay":False,
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -462,6 +462,46 @@ def speak_text_browser(text_value):
         key=f"TTS_{st.session_state.tts_counter}",
     )
 
+def handle_voice_control_command(prompt):
+    t=(prompt or "").strip().replace(" ","")
+    if not t:
+        return False
+
+    one_shot_terms=("읽어줘","소리내서읽어줘","답변읽어줘","마지막답변읽어줘")
+    if any(term in t for term in one_shot_terms) and not any(term in t for term in ("이제부터","계속","항상","자동")):
+        last_answer=""
+        for msg in reversed(st.session_state.messages):
+            if msg.get("role")=="assistant":
+                last_answer=msg.get("content","")
+                break
+        if last_answer:
+            speak_text_browser(last_answer)
+            st.toast("마지막 답변을 읽습니다.")
+        else:
+            st.toast("읽을 답변이 아직 없습니다.")
+        return True
+
+    on_terms=("이제부터읽어줘","계속읽어줘","자동으로읽어줘","음성안내켜","음성모드켜")
+    if any(term in t for term in on_terms):
+        st.session_state.voice_autoplay=True
+        st.session_state["voice_autoplay_toggle"]=True
+        confirm="음성 안내 모드로 전환했습니다. 이후 답변을 소리 내어 읽겠습니다."
+        st.session_state.messages.append({"role":"assistant","content":confirm})
+        st.session_state.pending_tts=confirm
+        st.toast("음성 안내 ON")
+        return True
+
+    off_terms=("읽지마","그만읽어","음성안내꺼","음성모드꺼","자동읽기꺼")
+    if any(term in t for term in off_terms):
+        st.session_state.voice_autoplay=False
+        st.session_state["voice_autoplay_toggle"]=False
+        confirm="음성 안내를 껐습니다. 이후 답변은 화면에만 표시합니다."
+        st.session_state.messages.append({"role":"assistant","content":confirm})
+        st.toast("음성 안내 OFF")
+        return True
+
+    return False
+
 def process_user_turn(prompt, input_mode="text"):
     st.session_state.messages.append({"role":"user","content":prompt})
     assistant_text=traveler_reply(prompt)
@@ -736,7 +776,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.7")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.8")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -768,7 +808,7 @@ with chat_tab:
 
     # Speak only replies that came from a voice turn. Browsers can still block
     # automatic audio, so a replay button is provided below.
-    if st.session_state.get("pending_tts") and st.session_state.get("voice_autoplay",True):
+    if st.session_state.get("pending_tts") and st.session_state.get("voice_autoplay",False):
         pending=st.session_state.pending_tts
         st.session_state.pending_tts=None
         speak_text_browser(pending)
@@ -784,9 +824,10 @@ with chat_tab:
         )
     with voice_cols[1]:
         st.session_state.voice_autoplay=st.toggle(
-            "답변 읽기",
-            value=st.session_state.get("voice_autoplay",True),
+            "음성 안내",
+            value=st.session_state.get("voice_autoplay",False),
             key="voice_autoplay_toggle",
+            help="켜면 이후 AI 답변을 자동으로 읽습니다.",
         )
 
     if st.session_state.messages and st.session_state.messages[-1].get("role")=="assistant":
@@ -802,13 +843,19 @@ with chat_tab:
                 voice_text=transcribe_audio(audio_value)
             if voice_text:
                 st.toast(f"음성 인식: {voice_text}")
+                if handle_voice_control_command(voice_text):
+                    persist_browser_store()
+                    st.rerun()
                 answer=process_user_turn(voice_text,input_mode="voice")
-                if st.session_state.get("voice_autoplay",True):
+                if st.session_state.get("voice_autoplay",False):
                     st.session_state.pending_tts=answer
                 st.rerun()
 
     prompt=st.chat_input("여행 중 궁금한 것을 말하세요")
     if prompt:
+        if handle_voice_control_command(prompt):
+            persist_browser_store()
+            st.rerun()
         process_user_turn(prompt,input_mode="text")
         st.rerun()
 
