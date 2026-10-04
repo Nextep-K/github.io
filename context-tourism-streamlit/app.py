@@ -597,26 +597,27 @@ def rubric():
 init_state()
 load_browser_store()
 
-# Personal-use access gate. Set APP_PASSCODE in Streamlit Secrets before enabling
-# write-capable integrations such as Notion.
-app_passcode=secret("APP_PASSCODE")
-if app_passcode:
-    if not st.session_state.get("authenticated"):
-        st.title("Context Tourism Pilot")
-        st.caption("개인용 파일럿")
-        entered=st.text_input("Passcode",type="password")
-        if st.button("열기",use_container_width=True):
-            if entered==app_passcode:
-                st.session_state.authenticated=True
-                st.rerun()
-            else:
-                st.error("Passcode가 맞지 않습니다.")
-        st.stop()
+def admin_access_gate(key_suffix):
+    app_passcode=secret("APP_PASSCODE")
+    if st.session_state.get("admin_authenticated"):
+        return True
+    if not app_passcode:
+        st.warning("관리자 비밀번호가 설정되지 않았습니다.")
+        return False
+    st.caption("개인 기록 보호를 위해 관리자 영역만 잠겨 있습니다.")
+    entered=st.text_input("관리자 비밀번호",type="password",key=f"admin_passcode_{key_suffix}")
+    if st.button("관리자 열기",use_container_width=True,key=f"admin_open_{key_suffix}"):
+        if entered==app_passcode:
+            st.session_state.admin_authenticated=True
+            st.rerun()
+        else:
+            st.error("비밀번호가 맞지 않습니다.")
+    return False
 
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.4")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.5")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -626,6 +627,10 @@ c.metric("지출",f'{j["spend_krw"]:,}원')
 ai_ready=bool(secret("OPENAI_API_KEY"))
 notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
 st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"연결됨" if notion_ready else "대기"} · Journey 저장: 자동')
+if st.session_state.get("admin_authenticated"):
+    if st.button("관리자 잠금",key="lock_admin"):
+        st.session_state.admin_authenticated=False
+        st.rerun()
 
 chat_tab,history_tab,admin_tab=st.tabs(["대화","지난 Journey","관리자"])
 
@@ -654,101 +659,107 @@ with chat_tab:
         st.rerun()
 
 with history_tab:
-    st.subheader("지난 Journey")
-
-    items=[]
-    if st.session_state.saved_active:
-        items.append(("active",st.session_state.saved_active))
-    for h in st.session_state.journey_history:
-        items.append(("history",h))
-
-    if not items:
-        st.info("저장된 Journey가 아직 없습니다.")
+    if not admin_access_gate("history"):
+        st.info("비밀번호를 입력하면 지난 Journey 기록을 볼 수 있습니다.")
     else:
-        seen=set()
-        for kind,payload in items:
-            jh=payload.get("journey") or {}
-            jid=jh.get("id")
-            if not jid or jid in seen:
-                continue
-            seen.add(jid)
-            st.markdown(f"**{journey_time_label(payload)}**  \n{journey_route_label(payload)}")
-            cols=st.columns([1,1,4])
-            if cols[0].button("보기",key=f"view_{jid}"):
-                st.session_state.selected_history_id=jid
-            if jh.get("state")!="ENDED":
-                if cols[1].button("이어가기",key=f"resume_{jid}"):
-                    resume_payload(payload)
-                    persist_browser_store()
-                    st.rerun()
-            st.divider()
+        st.subheader("지난 Journey")
 
-        selected=None
-        sid=st.session_state.selected_history_id
-        if sid:
-            for _,payload in items:
-                if (payload.get("journey") or {}).get("id")==sid:
-                    selected=payload
-                    break
+        items=[]
+        if st.session_state.saved_active:
+            items.append(("active",st.session_state.saved_active))
+        for h in st.session_state.journey_history:
+            items.append(("history",h))
 
-        if selected:
-            sj=selected.get("journey") or {}
-            st.subheader("Journey 상세")
-            st.caption(f'{journey_time_label(selected)} · {journey_route_label(selected)}')
-            st.write(f'상태: **{sj.get("state") or "—"}**')
-            events=selected.get("events") or []
-            if events:
-                labels=[]
-                for idx,e in enumerate(events):
-                    t=(e.get("occurred_at") or "")[11:19] or "시간"
-                    labels.append(f'{idx+1}. {t} · {e.get("type","Event")} · {e.get("subtype","")}')
-                pick=st.selectbox("이벤트 시간 선택",options=list(range(len(events))),format_func=lambda i:labels[i],key=f"event_pick_{sid}")
-                ev=events[pick]
-                st.write(ev.get("detail") or "")
-                with st.expander("이 시점의 맥락 보기"):
-                    st.json(ev.get("context") or {})
-            else:
-                st.caption("저장된 Event가 없습니다.")
+        if not items:
+            st.info("저장된 Journey가 아직 없습니다.")
+        else:
+            seen=set()
+            for kind,payload in items:
+                jh=payload.get("journey") or {}
+                jid=jh.get("id")
+                if not jid or jid in seen:
+                    continue
+                seen.add(jid)
+                st.markdown(f"**{journey_time_label(payload)}**  \n{journey_route_label(payload)}")
+                cols=st.columns([1,1,4])
+                if cols[0].button("보기",key=f"view_{jid}"):
+                    st.session_state.selected_history_id=jid
+                if jh.get("state")!="ENDED":
+                    if cols[1].button("이어가기",key=f"resume_{jid}"):
+                        resume_payload(payload)
+                        persist_browser_store()
+                        st.rerun()
+                st.divider()
+
+            selected=None
+            sid=st.session_state.selected_history_id
+            if sid:
+                for _,payload in items:
+                    if (payload.get("journey") or {}).get("id")==sid:
+                        selected=payload
+                        break
+
+            if selected:
+                sj=selected.get("journey") or {}
+                st.subheader("Journey 상세")
+                st.caption(f'{journey_time_label(selected)} · {journey_route_label(selected)}')
+                st.write(f'상태: **{sj.get("state") or "—"}**')
+                events=selected.get("events") or []
+                if events:
+                    labels=[]
+                    for idx,e in enumerate(events):
+                        t=(e.get("occurred_at") or "")[11:19] or "시간"
+                        labels.append(f'{idx+1}. {t} · {e.get("type","Event")} · {e.get("subtype","")}')
+                    pick=st.selectbox("이벤트 시간 선택",options=list(range(len(events))),format_func=lambda i:labels[i],key=f"event_pick_{sid}")
+                    ev=events[pick]
+                    st.write(ev.get("detail") or "")
+                    with st.expander("이 시점의 맥락 보기"):
+                        st.json(ev.get("context") or {})
+                else:
+                    st.caption("저장된 Event가 없습니다.")
 
 with admin_tab:
-    st.subheader("Context Trajectory")
-    if st.session_state.events:
-        rows=[]
-        for e in st.session_state.events:
-            loc=e.get("location") or {}
-            rows.append({"time":e["occurred_at"][11:19],"type":e["type"],"subtype":e["subtype"],"detail":e["detail"],"lat":loc.get("latitude"),"lon":loc.get("longitude"),"source":e["explicit_or_inferred"],"confidence":e["confidence"]})
-        st.dataframe(rows,use_container_width=True,hide_index=True)
+    if not admin_access_gate("admin"):
+        st.info("비밀번호를 입력하면 관리자 분석 화면을 볼 수 있습니다.")
     else:
-        st.info("아직 구조화된 Event가 없습니다.")
+        st.subheader("Context Trajectory")
+        if st.session_state.events:
+            rows=[]
+            for e in st.session_state.events:
+                loc=e.get("location") or {}
+                rows.append({"time":e["occurred_at"][11:19],"type":e["type"],"subtype":e["subtype"],"detail":e["detail"],"lat":loc.get("latitude"),"lon":loc.get("longitude"),"source":e["explicit_or_inferred"],"confidence":e["confidence"]})
+            st.dataframe(rows,use_container_width=True,hide_index=True)
+        else:
+            st.info("아직 구조화된 Event가 없습니다.")
 
-    status,evidence=rubric()
-    st.subheader("Rubric")
-    st.write(f"**{status}**")
-    st.caption(evidence)
+        status,evidence=rubric()
+        st.subheader("Rubric")
+        st.write(f"**{status}**")
+        st.caption(evidence)
 
-    st.subheader("Notion")
-    if notion_ready:
-        if st.button("현재 Journey를 Notion에 저장",use_container_width=True):
-            try:
-                sync_notion()
-                st.success("Journey DB와 Pilot Reports에 저장했습니다.")
-            except Exception as e:
-                st.error(f"Notion 저장 실패: {e}")
-    else:
-        st.warning("Notion Secrets 미설정. Streamlit Secrets에 연결값을 넣으면 활성화됩니다.")
+        st.subheader("Notion")
+        if notion_ready:
+            if st.button("현재 Journey를 Notion에 저장",use_container_width=True):
+                try:
+                    sync_notion()
+                    st.success("Journey DB와 Pilot Reports에 저장했습니다.")
+                except Exception as e:
+                    st.error(f"Notion 저장 실패: {e}")
+        else:
+            st.warning("Notion Secrets 미설정. Streamlit Secrets에 연결값을 넣으면 활성화됩니다.")
 
-    export={"journey":st.session_state.journey,"location":st.session_state.location,"events":st.session_state.events,"messages":st.session_state.messages}
-    st.download_button("JSON 내보내기",data=json.dumps(export,ensure_ascii=False,indent=2),file_name=f'context-journey-{j["id"][:8]}.json',mime="application/json",use_container_width=True)
+        export={"journey":st.session_state.journey,"location":st.session_state.location,"events":st.session_state.events,"messages":st.session_state.messages}
+        st.download_button("JSON 내보내기",data=json.dumps(export,ensure_ascii=False,indent=2),file_name=f'context-journey-{j["id"][:8]}.json',mime="application/json",use_container_width=True)
 
-    persist_browser_store()
-
-    if st.button("새 Journey 시작",use_container_width=True):
-        current=state_payload()
-        if payload_has_activity(current):
-            if (current.get("journey") or {}).get("state")=="ENDED":
-                upsert_history(current)
-            else:
-                st.session_state.saved_active=current
-        reset_current_journey()
         persist_browser_store()
-        st.rerun()
+
+        if st.button("새 Journey 시작",use_container_width=True):
+            current=state_payload()
+            if payload_has_activity(current):
+                if (current.get("journey") or {}).get("state")=="ENDED":
+                    upsert_history(current)
+                else:
+                    st.session_state.saved_active=current
+            reset_current_journey()
+            persist_browser_store()
+            st.rerun()
