@@ -232,6 +232,11 @@ def persist_browser_store():
     active=st.session_state.saved_active
 
     if payload_has_activity(current):
+        current_id=j.get("id")
+        active_id=((active or {}).get("journey") or {}).get("id")
+        # Starting another Journey must never destroy an unfinished saved Journey.
+        if active and active_id and current_id and active_id!=current_id:
+            upsert_history(active)
         if j.get("state")=="ENDED":
             upsert_history(current)
             active=None
@@ -253,12 +258,18 @@ def resume_payload(payload):
     payload=normalize_saved_payload(payload)
     if not payload:
         return
+    jid=(payload.get("journey") or {}).get("id")
     st.session_state.messages=payload.get("messages") or [{"role":"assistant","content":"이어서 진행하겠습니다."}]
     st.session_state.events=payload.get("events") or []
     st.session_state.journey=payload.get("journey") or blank_journey()
     st.session_state.location=payload.get("location")
     st.session_state.last_location_key=payload.get("last_location_key")
     st.session_state.saved_active=None
+    if jid:
+        st.session_state.journey_history=[
+            h for h in st.session_state.journey_history
+            if ((h.get("journey") or {}).get("id")!=jid)
+        ]
     st.session_state.selected_history_id=None
 
 def reset_current_journey():
@@ -665,7 +676,7 @@ with history_tab:
             cols=st.columns([1,1,4])
             if cols[0].button("보기",key=f"view_{jid}"):
                 st.session_state.selected_history_id=jid
-            if kind=="active" and jh.get("state")!="ENDED":
+            if jh.get("state")!="ENDED":
                 if cols[1].button("이어가기",key=f"resume_{jid}"):
                     resume_payload(payload)
                     persist_browser_store()
