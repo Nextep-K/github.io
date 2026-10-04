@@ -108,16 +108,34 @@ def secret(name, default=None):
     except Exception:
         return default
 
-BROWSER_STATE_KEY="contextTourismPilot.v03"
+BROWSER_STATE_KEY="contextTourismPilot.v04"
+LEGACY_BROWSER_STATE_KEY="contextTourismPilot.v03"
+
+def blank_journey():
+    return {
+        "id":str(uuid.uuid4()),
+        "state":"IDLE",
+        "origin":None,
+        "destination":None,
+        "transport":None,
+        "spend_krw":0,
+        "created_at":now_iso(),
+        "started_at":None,
+        "ended_at":None,
+        "notion_synced_at":None,
+    }
 
 def init_state():
     defaults={
         "messages":[{"role":"assistant","content":"여행을 시작해 보겠습니다. 지금 어디에 있고, 어디로 가실 예정인가요?"}],
         "events":[],
-        "journey":{"id":str(uuid.uuid4()),"state":"IDLE","origin":None,"destination":None,"transport":None,"spend_krw":0,"started_at":None,"ended_at":None},
+        "journey":blank_journey(),
         "location":None,
         "last_location_key":None,
-        "browser_restore_done":False,
+        "browser_store_loaded":False,
+        "saved_active":None,
+        "journey_history":[],
+        "selected_history_id":None,
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -132,35 +150,146 @@ def state_payload():
         "last_location_key":st.session_state.last_location_key,
     }
 
-def restore_browser_state():
-    if st.session_state.pop("skip_browser_restore",False):
-        st.session_state.browser_restore_done=True
-        return
-    if st.session_state.browser_restore_done:
+def payload_has_activity(payload):
+    if not payload or not isinstance(payload,dict):
+        return False
+    j=payload.get("journey") or {}
+    return bool(
+        payload.get("events")
+        or len(payload.get("messages") or [])>1
+        or j.get("destination")
+        or j.get("origin")
+        or j.get("state") not in (None,"IDLE")
+    )
+
+def normalize_saved_payload(payload):
+    if not isinstance(payload,dict):
+        return None
+    j=payload.get("journey")
+    if not isinstance(j,dict):
+        return None
+    j.setdefault("created_at", j.get("started_at") or now_iso())
+    j.setdefault("notion_synced_at",None)
+    payload.setdefault("messages",[])
+    payload.setdefault("events",[])
+    payload.setdefault("location",None)
+    payload.setdefault("last_location_key",None)
+    return payload
+
+def load_browser_store():
+    if st.session_state.browser_store_loaded:
         return
     raw=streamlit_js_eval(
-        js_expressions=f'localStorage.getItem("{BROWSER_STATE_KEY}") || "__EMPTY__"',
+        js_expressions=f'localStorage.getItem("{BROWSER_STATE_KEY}") || localStorage.getItem("{LEGACY_BROWSER_STATE_KEY}") || "__EMPTY__"',
         want_output=True,
-        key="LOAD_BROWSER_STATE",
+        key="LOAD_BROWSER_STORE",
     )
     if raw is None:
         return
-    st.session_state.browser_restore_done=True
+    st.session_state.browser_store_loaded=True
     if raw=="__EMPTY__":
         return
     try:
         saved=json.loads(raw)
-        if isinstance(saved,dict):
-            for key in ("messages","events","journey","location","last_location_key"):
-                if key in saved:
-                    st.session_state[key]=saved[key]
+        if not isinstance(saved,dict):
+            return
+        # v0.4 store
+        if "history" in saved or "active" in saved:
+            active=normalize_saved_payload(saved.get("active"))
+            history=[]
+            for item in saved.get("history") or []:
+                item=normalize_saved_payload(item)
+                if item:
+                    history.append(item)
+            st.session_state.saved_active=active if payload_has_activity(active) else None
+            st.session_state.journey_history=history
+        # v0.3 legacy single-session payload: keep as resumable, do not auto-restore.
+        elif "journey" in saved:
+            legacy=normalize_saved_payload(saved)
+            if legacy and payload_has_activity(legacy):
+                if (legacy.get("journey") or {}).get("state")=="ENDED":
+                    st.session_state.journey_history=[legacy]
+                else:
+                    st.session_state.saved_active=legacy
     except Exception:
         pass
 
-def backup_browser_state():
-    payload=json.dumps(state_payload(),ensure_ascii=False,separators=(",",":"))
-    expr=f'localStorage.setItem("{BROWSER_STATE_KEY}", {json.dumps(payload)})'
-    streamlit_js_eval(js_expressions=expr,want_output=False,key="SAVE_BROWSER_STATE")
+def upsert_history(payload):
+    payload=normalize_saved_payload(payload)
+    if not payload:
+        return
+    jid=(payload.get("journey") or {}).get("id")
+    if not jid:
+        return
+    history=[h for h in st.session_state.journey_history if (h.get("journey") or {}).get("id")!=jid]
+    history.append(payload)
+    history.sort(key=lambda x:(x.get("journey") or {}).get("created_at") or "",reverse=True)
+    st.session_state.journey_history=history[:100]
+
+def persist_browser_store():
+    current=state_payload()
+    j=current.get("journey") or {}
+    active=st.session_state.saved_active
+
+    if payload_has_activity(current):
+        if j.get("state")=="ENDED":
+            upsert_history(current)
+            active=None
+        else:
+            active=current
+    st.session_state.saved_active=active
+
+    store={
+        "version":4,
+        "saved_at":now_iso(),
+        "active":active,
+        "history":st.session_state.journey_history,
+    }
+    raw=json.dumps(store,ensure_ascii=False,separators=(",",":"))
+    expr=f'localStorage.setItem("{BROWSER_STATE_KEY}", {json.dumps(raw)}); localStorage.removeItem("{LEGACY_BROWSER_STATE_KEY}")'
+    streamlit_js_eval(js_expressions=expr,want_output=False,key="SAVE_BROWSER_STORE")
+
+def resume_payload(payload):
+    payload=normalize_saved_payload(payload)
+    if not payload:
+        return
+    st.session_state.messages=payload.get("messages") or [{"role":"assistant","content":"이어서 진행하겠습니다."}]
+    st.session_state.events=payload.get("events") or []
+    st.session_state.journey=payload.get("journey") or blank_journey()
+    st.session_state.location=payload.get("location")
+    st.session_state.last_location_key=payload.get("last_location_key")
+    st.session_state.saved_active=None
+    st.session_state.selected_history_id=None
+
+def reset_current_journey():
+    st.session_state.messages=[{"role":"assistant","content":"여행을 시작해 보겠습니다. 지금 어디에 있고, 어디로 가실 예정인가요?"}]
+    st.session_state.events=[]
+    st.session_state.journey=blank_journey()
+    st.session_state.location=None
+    st.session_state.last_location_key=None
+    st.session_state.selected_history_id=None
+
+def journey_time_label(payload):
+    j=payload.get("journey") or {}
+    events=payload.get("events") or []
+    start=j.get("created_at") or j.get("started_at") or (events[0].get("occurred_at") if events else None)
+    end=j.get("ended_at") or (events[-1].get("occurred_at") if events else None)
+    try:
+        s=datetime.fromisoformat(start) if start else None
+        e=datetime.fromisoformat(end) if end else None
+        if s and e and s.date()==e.date():
+            return f"{s:%Y-%m-%d %H:%M}–{e:%H:%M}"
+        if s:
+            return f"{s:%Y-%m-%d %H:%M}"
+    except Exception:
+        pass
+    return "시간 미상"
+
+def journey_route_label(payload):
+    j=payload.get("journey") or {}
+    origin=j.get("origin") or "현재 위치"
+    destination=j.get("destination") or "목적지 미정"
+    return f"{origin} → {destination}"
 
 def snapshot():
     j=st.session_state.journey
@@ -359,6 +488,8 @@ def observe_turn(text, assistant_text):
 
 def apply_result(result):
     j=st.session_state.journey
+    j.setdefault("created_at",now_iso())
+    j.setdefault("notion_synced_at",None)
     u=result.get("state_updates") or {}
     state=u.get("state")
     if state in ALLOWED_STATES:
@@ -424,6 +555,24 @@ def sync_notion():
         },
     )
 
+def auto_sync_completed_journey():
+    j=st.session_state.journey
+    if j.get("state")!="ENDED" or j.get("notion_synced_at"):
+        return
+    ready=all([
+        secret("NOTION_TOKEN"),
+        secret("NOTION_JOURNEY_DATA_SOURCE_ID"),
+        secret("NOTION_REPORT_DATA_SOURCE_ID"),
+    ])
+    if not ready:
+        return
+    try:
+        sync_notion()
+        j["notion_synced_at"]=now_iso()
+    except Exception:
+        # Local/browser storage remains authoritative; user can retry later.
+        pass
+
 def rubric():
     counts={}
     for e in st.session_state.events:
@@ -435,7 +584,7 @@ def rubric():
     return "반복 패턴","; ".join(f"{k[0]}/{k[1]} ×{v}" for k,v in repeated[:5])
 
 init_state()
-restore_browser_state()
+load_browser_store()
 
 # Personal-use access gate. Set APP_PASSCODE in Streamlit Secrets before enabling
 # write-capable integrations such as Notion.
@@ -456,7 +605,7 @@ if app_passcode:
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.3")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.4")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -465,11 +614,13 @@ b.metric("목적지",j["destination"] or "—")
 c.metric("지출",f'{j["spend_krw"]:,}원')
 ai_ready=bool(secret("OPENAI_API_KEY"))
 notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
-st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"연결됨" if notion_ready else "대기"} · 브라우저 백업: 켜짐')
+st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"연결됨" if notion_ready else "대기"} · Journey 저장: 자동')
 
-chat_tab,admin_tab=st.tabs(["대화","관리자"])
+chat_tab,history_tab,admin_tab=st.tabs(["대화","지난 Journey","관리자"])
 
 with chat_tab:
+    if st.session_state.saved_active and not payload_has_activity(state_payload()):
+        st.info("중간에 멈춘 Journey가 저장되어 있습니다. '지난 Journey' 탭에서 이어갈 수 있습니다.")
     if st.session_state.location:
         loc=st.session_state.location
         st.caption(f'현재 위치: {loc["latitude"]:.5f}, {loc["longitude"]:.5f} · 정확도 {loc.get("accuracy") or "—"}m')
@@ -487,8 +638,66 @@ with chat_tab:
         result=observe_turn(prompt,assistant_text)
         apply_result(result)
         st.session_state.messages.append({"role":"assistant","content":assistant_text or "확인했습니다."})
-        backup_browser_state()
+        auto_sync_completed_journey()
+        persist_browser_store()
         st.rerun()
+
+with history_tab:
+    st.subheader("지난 Journey")
+
+    items=[]
+    if st.session_state.saved_active:
+        items.append(("active",st.session_state.saved_active))
+    for h in st.session_state.journey_history:
+        items.append(("history",h))
+
+    if not items:
+        st.info("저장된 Journey가 아직 없습니다.")
+    else:
+        seen=set()
+        for kind,payload in items:
+            jh=payload.get("journey") or {}
+            jid=jh.get("id")
+            if not jid or jid in seen:
+                continue
+            seen.add(jid)
+            st.markdown(f"**{journey_time_label(payload)}**  \n{journey_route_label(payload)}")
+            cols=st.columns([1,1,4])
+            if cols[0].button("보기",key=f"view_{jid}"):
+                st.session_state.selected_history_id=jid
+            if kind=="active" and jh.get("state")!="ENDED":
+                if cols[1].button("이어가기",key=f"resume_{jid}"):
+                    resume_payload(payload)
+                    persist_browser_store()
+                    st.rerun()
+            st.divider()
+
+        selected=None
+        sid=st.session_state.selected_history_id
+        if sid:
+            for _,payload in items:
+                if (payload.get("journey") or {}).get("id")==sid:
+                    selected=payload
+                    break
+
+        if selected:
+            sj=selected.get("journey") or {}
+            st.subheader("Journey 상세")
+            st.caption(f'{journey_time_label(selected)} · {journey_route_label(selected)}')
+            st.write(f'상태: **{sj.get("state") or "—"}**')
+            events=selected.get("events") or []
+            if events:
+                labels=[]
+                for idx,e in enumerate(events):
+                    t=(e.get("occurred_at") or "")[11:19] or "시간"
+                    labels.append(f'{idx+1}. {t} · {e.get("type","Event")} · {e.get("subtype","")}')
+                pick=st.selectbox("이벤트 시간 선택",options=list(range(len(events))),format_func=lambda i:labels[i],key=f"event_pick_{sid}")
+                ev=events[pick]
+                st.write(ev.get("detail") or "")
+                with st.expander("이 시점의 맥락 보기"):
+                    st.json(ev.get("context") or {})
+            else:
+                st.caption("저장된 Event가 없습니다.")
 
 with admin_tab:
     st.subheader("Context Trajectory")
@@ -520,15 +729,15 @@ with admin_tab:
     export={"journey":st.session_state.journey,"location":st.session_state.location,"events":st.session_state.events,"messages":st.session_state.messages}
     st.download_button("JSON 내보내기",data=json.dumps(export,ensure_ascii=False,indent=2),file_name=f'context-journey-{j["id"][:8]}.json',mime="application/json",use_container_width=True)
 
-    backup_browser_state()
+    persist_browser_store()
 
     if st.button("새 Journey 시작",use_container_width=True):
-        streamlit_js_eval(
-            js_expressions=f'localStorage.removeItem("{BROWSER_STATE_KEY}")',
-            want_output=False,
-            key="CLEAR_BROWSER_STATE",
-        )
-        st.session_state.skip_browser_restore=True
-        for key in ["messages","events","journey","location","last_location_key","browser_restore_done"]:
-            st.session_state.pop(key,None)
+        current=state_payload()
+        if payload_has_activity(current):
+            if (current.get("journey") or {}).get("state")=="ENDED":
+                upsert_history(current)
+            else:
+                st.session_state.saved_active=current
+        reset_current_journey()
+        persist_browser_store()
         st.rerun()
