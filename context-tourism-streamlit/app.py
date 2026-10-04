@@ -110,6 +110,7 @@ def secret(name, default=None):
 
 BROWSER_STATE_KEY="contextTourismPilot.v04"
 LEGACY_BROWSER_STATE_KEY="contextTourismPilot.v03"
+DEFAULT_RAW_LOG_DS_ID="d48e3ba6-0769-4a95-bf70-a27d9eabbf37"
 
 def blank_journey():
     return {
@@ -123,12 +124,15 @@ def blank_journey():
         "started_at":None,
         "ended_at":None,
         "notion_synced_at":None,
+        "notion_journey_page_id":None,
+        "notion_report_page_id":None,
     }
 
 def init_state():
     defaults={
         "messages":[{"role":"assistant","content":"여행을 시작해 보겠습니다. 지금 어디에 있고, 어디로 가실 예정인가요?"}],
         "events":[],
+        "turns":[],
         "journey":blank_journey(),
         "location":None,
         "last_location_key":None,
@@ -145,6 +149,7 @@ def state_payload():
     return {
         "messages":st.session_state.messages,
         "events":st.session_state.events,
+        "turns":st.session_state.turns,
         "journey":st.session_state.journey,
         "location":st.session_state.location,
         "last_location_key":st.session_state.last_location_key,
@@ -170,8 +175,11 @@ def normalize_saved_payload(payload):
         return None
     j.setdefault("created_at", j.get("started_at") or now_iso())
     j.setdefault("notion_synced_at",None)
+    j.setdefault("notion_journey_page_id",None)
+    j.setdefault("notion_report_page_id",None)
     payload.setdefault("messages",[])
     payload.setdefault("events",[])
+    payload.setdefault("turns",[])
     payload.setdefault("location",None)
     payload.setdefault("last_location_key",None)
     return payload
@@ -261,6 +269,7 @@ def resume_payload(payload):
     jid=(payload.get("journey") or {}).get("id")
     st.session_state.messages=payload.get("messages") or [{"role":"assistant","content":"이어서 진행하겠습니다."}]
     st.session_state.events=payload.get("events") or []
+    st.session_state.turns=payload.get("turns") or []
     st.session_state.journey=payload.get("journey") or blank_journey()
     st.session_state.location=payload.get("location")
     st.session_state.last_location_key=payload.get("last_location_key")
@@ -275,6 +284,7 @@ def resume_payload(payload):
 def reset_current_journey():
     st.session_state.messages=[{"role":"assistant","content":"여행을 시작해 보겠습니다. 지금 어디에 있고, 어디로 가실 예정인가요?"}]
     st.session_state.events=[]
+    st.session_state.turns=[]
     st.session_state.journey=blank_journey()
     st.session_state.location=None
     st.session_state.last_location_key=None
@@ -501,6 +511,8 @@ def apply_result(result):
     j=st.session_state.journey
     j.setdefault("created_at",now_iso())
     j.setdefault("notion_synced_at",None)
+    j.setdefault("notion_journey_page_id",None)
+    j.setdefault("notion_report_page_id",None)
     u=result.get("state_updates") or {}
     state=u.get("state")
     if state in ALLOWED_STATES:
@@ -528,61 +540,99 @@ def rich(value):
 def title(value):
     return {"title":[{"type":"text","text":{"content":str(value)[:1900]}}]}
 
-def sync_notion():
+def sync_notion_checkpoint(finalize=False):
     token=secret("NOTION_TOKEN")
     journey_ds=secret("NOTION_JOURNEY_DATA_SOURCE_ID")
     report_ds=secret("NOTION_REPORT_DATA_SOURCE_ID")
+    raw_log_ds=secret("NOTION_RAW_LOG_DATA_SOURCE_ID",DEFAULT_RAW_LOG_DS_ID)
     if not token or not journey_ds or not report_ds or NotionClient is None:
         raise RuntimeError("Notion Secrets가 설정되지 않았습니다.")
+
     notion=NotionClient(auth=token)
     j=st.session_state.journey
     d=datetime.now().date().isoformat()
     summary=f'{j.get("origin") or "현재 위치"} → {j.get("destination") or "미정"} / {j.get("transport") or "미정"} / {len(st.session_state.events)} events'
+
     props={
         "Journey":title(f"Journey {d} · {j['id'][:8]}"),
         "Date":{"date":{"start":d}},
         "Origin":rich(j.get("origin") or ""),
         "Destination":rich(j.get("destination") or ""),
-        "State":{"select":{"name":j.get("state") or "ENDED"}},
         "Spend KRW":{"number":j.get("spend_krw") or 0},
         "Event Count":{"number":len(st.session_state.events)},
         "Summary":rich(summary),
     }
+    if j.get("state") in {"PLANNING","MOVING","STAYING","ENDED"}:
+        props["State"]={"select":{"name":j["state"]}}
     if j.get("transport") in {"car","taxi","bus","walk","other"}:
         props["Transport"]={"select":{"name":j["transport"]}}
-    notion.pages.create(parent={"data_source_id":journey_ds},properties=props)
 
-    findings=" / ".join(f'{e["type"]}:{e["subtype"]}' for e in st.session_state.events[-20:])
-    notion.pages.create(
-        parent={"data_source_id":report_ds},
-        properties={
-            "Report":title(f"Session Report · {d} · {j['id'][:8]}"),
-            "Date":{"date":{"start":d}},
-            "Type":{"select":{"name":"Session"}},
-            "Journey ID":rich(j["id"]),
-            "Summary":rich(summary),
-            "Findings":rich(findings or "No structured events"),
-            "Next Action":rich("실제 사용 후 Event 추출·시공간 연결 오류 검토"),
-        },
-    )
+    if j.get("notion_journey_page_id"):
+        notion.pages.update(page_id=j["notion_journey_page_id"],properties=props)
+    else:
+        page=notion.pages.create(parent={"data_source_id":journey_ds},properties=props)
+        j["notion_journey_page_id"]=page.get("id")
 
-def auto_sync_completed_journey():
-    j=st.session_state.journey
-    if j.get("state")!="ENDED" or j.get("notion_synced_at"):
-        return
+    # Save every conversation turn as raw evidence. Successfully saved turns are
+    # marked locally so a rerun does not create duplicate rows.
+    if raw_log_ds:
+        for turn in st.session_state.turns:
+            if turn.get("notion_synced"):
+                continue
+            loc=turn.get("location") or {}
+            state=(turn.get("journey") or {}).get("state") or "IDLE"
+            destination=(turn.get("journey") or {}).get("destination") or ""
+            occurred=turn.get("occurred_at") or now_iso()
+            event_json=json.dumps(turn.get("events") or [],ensure_ascii=False,separators=(",",":"))
+            raw_props={
+                "Log":title(f"Turn {occurred[0:19]} · {j['id'][:8]}"),
+                "Journey ID":rich(j["id"]),
+                "Occurred At":{"date":{"start":occurred}},
+                "User Message":rich(turn.get("user_message") or ""),
+                "Assistant Message":rich(turn.get("assistant_message") or ""),
+                "Events JSON":rich(event_json),
+                "State":{"select":{"name":state if state in ALLOWED_STATES else "IDLE"}},
+                "Destination":rich(destination),
+            }
+            if loc.get("latitude") is not None:
+                raw_props["Latitude"]={"number":float(loc["latitude"])}
+            if loc.get("longitude") is not None:
+                raw_props["Longitude"]={"number":float(loc["longitude"])}
+            raw_page=notion.pages.create(parent={"data_source_id":raw_log_ds},properties=raw_props)
+            turn["notion_synced"]=True
+            turn["notion_page_id"]=raw_page.get("id")
+
+    if finalize and not j.get("notion_report_page_id"):
+        findings=" / ".join(f'{e["type"]}:{e["subtype"]}' for e in st.session_state.events[-20:])
+        report=notion.pages.create(
+            parent={"data_source_id":report_ds},
+            properties={
+                "Report":title(f"Session Report · {d} · {j['id'][:8]}"),
+                "Date":{"date":{"start":d}},
+                "Type":{"select":{"name":"Session"}},
+                "Journey ID":rich(j["id"]),
+                "Summary":rich(summary),
+                "Findings":rich(findings or "No structured events"),
+                "Next Action":rich("실제 사용 후 Event 추출·시공간 연결 오류 검토"),
+            },
+        )
+        j["notion_report_page_id"]=report.get("id")
+
+    j["notion_synced_at"]=now_iso()
+
+def auto_sync_notion_checkpoint():
     ready=all([
         secret("NOTION_TOKEN"),
         secret("NOTION_JOURNEY_DATA_SOURCE_ID"),
         secret("NOTION_REPORT_DATA_SOURCE_ID"),
     ])
-    if not ready:
+    if not ready or not payload_has_activity(state_payload()):
         return
     try:
-        sync_notion()
-        j["notion_synced_at"]=now_iso()
-    except Exception:
-        # Local/browser storage remains authoritative; user can retry later.
-        pass
+        sync_notion_checkpoint(finalize=st.session_state.journey.get("state")=="ENDED")
+    except Exception as e:
+        # Browser storage remains the fallback; the next successful turn can retry.
+        st.toast(f"Notion 자동저장 실패 — 기기에는 보관됨: {type(e).__name__}")
 
 def rubric():
     counts={}
@@ -617,7 +667,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.5")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.6")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -626,7 +676,7 @@ b.metric("목적지",j["destination"] or "—")
 c.metric("지출",f'{j["spend_krw"]:,}원')
 ai_ready=bool(secret("OPENAI_API_KEY"))
 notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
-st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"연결됨" if notion_ready else "대기"} · Journey 저장: 자동')
+st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"자동저장" if notion_ready else "대기"} · Journey 저장: 자동')
 if st.session_state.get("admin_authenticated"):
     if st.button("관리자 잠금",key="lock_admin"):
         st.session_state.admin_authenticated=False
@@ -654,7 +704,17 @@ with chat_tab:
         result=observe_turn(prompt,assistant_text)
         apply_result(result)
         st.session_state.messages.append({"role":"assistant","content":assistant_text or "확인했습니다."})
-        auto_sync_completed_journey()
+        st.session_state.turns.append({
+            "turn_id":str(uuid.uuid4()),
+            "occurred_at":now_iso(),
+            "user_message":prompt,
+            "assistant_message":assistant_text or "확인했습니다.",
+            "events":result.get("events") or [],
+            "journey":dict(st.session_state.journey),
+            "location":dict(st.session_state.location) if st.session_state.location else None,
+            "notion_synced":False,
+        })
+        auto_sync_notion_checkpoint()
         persist_browser_store()
         st.rerun()
 
@@ -739,16 +799,17 @@ with admin_tab:
 
         st.subheader("Notion")
         if notion_ready:
-            if st.button("현재 Journey를 Notion에 저장",use_container_width=True):
+            if st.button("현재 Journey를 Notion에 동기화",use_container_width=True):
                 try:
-                    sync_notion()
-                    st.success("Journey DB와 Pilot Reports에 저장했습니다.")
+                    sync_notion_checkpoint(finalize=st.session_state.journey.get("state")=="ENDED")
+                    persist_browser_store()
+                    st.success("Journey와 Raw Log를 Notion에 동기화했습니다.")
                 except Exception as e:
                     st.error(f"Notion 저장 실패: {e}")
         else:
             st.warning("Notion Secrets 미설정. Streamlit Secrets에 연결값을 넣으면 활성화됩니다.")
 
-        export={"journey":st.session_state.journey,"location":st.session_state.location,"events":st.session_state.events,"messages":st.session_state.messages}
+        export={"journey":st.session_state.journey,"location":st.session_state.location,"events":st.session_state.events,"messages":st.session_state.messages,"turns":st.session_state.turns}
         st.download_button("JSON 내보내기",data=json.dumps(export,ensure_ascii=False,indent=2),file_name=f'context-journey-{j["id"][:8]}.json',mime="application/json",use_container_width=True)
 
         persist_browser_store()
