@@ -1,3 +1,4 @@
+import hashlib
 import json
 import re
 import uuid
@@ -140,6 +141,10 @@ def init_state():
         "saved_active":None,
         "journey_history":[],
         "selected_history_id":None,
+        "last_audio_digest":None,
+        "pending_tts":None,
+        "tts_counter":0,
+        "voice_autoplay":True,
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -415,6 +420,70 @@ def fallback(text):
 
     return {"assistant_text":reply,"events":events,"state_updates":updates}
 
+def transcribe_audio(audio_value):
+    key=secret("OPENAI_API_KEY")
+    if not key or OpenAI is None or audio_value is None:
+        return ""
+    try:
+        audio_bytes=audio_value.getvalue()
+        if not audio_bytes:
+            return ""
+        client=OpenAI(api_key=key)
+        result=client.audio.transcriptions.create(
+            model=secret("OPENAI_TRANSCRIBE_MODEL","gpt-4o-mini-transcribe"),
+            file=("voice.wav",audio_bytes,"audio/wav"),
+            language="ko",
+        )
+        return (getattr(result,"text","") or "").strip()
+    except Exception as e:
+        st.toast(f"음성 인식 실패: {type(e).__name__}")
+        return ""
+
+def speak_text_browser(text_value):
+    if not text_value:
+        return
+    st.session_state.tts_counter=int(st.session_state.get("tts_counter",0))+1
+    safe_text=str(text_value)[:3000]
+    js=f"""
+    (() => {{
+      if (!('speechSynthesis' in window)) return 'unsupported';
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance({json.dumps(safe_text,ensure_ascii=False)});
+      u.lang = 'ko-KR';
+      u.rate = 1.0;
+      u.pitch = 1.0;
+      window.speechSynthesis.speak(u);
+      return 'started';
+    }})()
+    """
+    streamlit_js_eval(
+        js_expressions=js,
+        want_output=False,
+        key=f"TTS_{st.session_state.tts_counter}",
+    )
+
+def process_user_turn(prompt, input_mode="text"):
+    st.session_state.messages.append({"role":"user","content":prompt})
+    assistant_text=traveler_reply(prompt)
+    result=observe_turn(prompt,assistant_text)
+    apply_result(result)
+    answer=assistant_text or "확인했습니다."
+    st.session_state.messages.append({"role":"assistant","content":answer})
+    st.session_state.turns.append({
+        "turn_id":str(uuid.uuid4()),
+        "occurred_at":now_iso(),
+        "input_mode":input_mode,
+        "user_message":prompt,
+        "assistant_message":answer,
+        "events":result.get("events") or [],
+        "journey":dict(st.session_state.journey),
+        "location":dict(st.session_state.location) if st.session_state.location else None,
+        "notion_synced":False,
+    })
+    auto_sync_notion_checkpoint()
+    persist_browser_store()
+    return answer
+
 def traveler_reply(text):
     key=secret("OPENAI_API_KEY")
     if not key or OpenAI is None:
@@ -667,7 +736,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.6")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.7")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -697,25 +766,50 @@ with chat_tab:
         with st.chat_message(msg["role"]):
             st.markdown(msg["content"])
 
+    # Speak only replies that came from a voice turn. Browsers can still block
+    # automatic audio, so a replay button is provided below.
+    if st.session_state.get("pending_tts") and st.session_state.get("voice_autoplay",True):
+        pending=st.session_state.pending_tts
+        st.session_state.pending_tts=None
+        speak_text_browser(pending)
+
+    st.caption("음성으로 말하거나 아래 입력창에 직접 입력할 수 있습니다.")
+    voice_cols=st.columns([3,1])
+    with voice_cols[0]:
+        audio_value=st.audio_input(
+            "마이크로 질문",
+            sample_rate=16000,
+            key="voice_input",
+            help="마이크를 누르고 말한 뒤 녹음을 마치면 자동으로 질문으로 전송합니다.",
+        )
+    with voice_cols[1]:
+        st.session_state.voice_autoplay=st.toggle(
+            "답변 읽기",
+            value=st.session_state.get("voice_autoplay",True),
+            key="voice_autoplay_toggle",
+        )
+
+    if st.session_state.messages and st.session_state.messages[-1].get("role")=="assistant":
+        if st.button("🔊 답변 다시 듣기",key="replay_answer",use_container_width=True):
+            speak_text_browser(st.session_state.messages[-1].get("content",""))
+
+    if audio_value is not None:
+        audio_bytes=audio_value.getvalue()
+        digest=hashlib.sha256(audio_bytes).hexdigest() if audio_bytes else None
+        if digest and digest!=st.session_state.get("last_audio_digest"):
+            st.session_state.last_audio_digest=digest
+            with st.spinner("음성을 듣고 있습니다…"):
+                voice_text=transcribe_audio(audio_value)
+            if voice_text:
+                st.toast(f"음성 인식: {voice_text}")
+                answer=process_user_turn(voice_text,input_mode="voice")
+                if st.session_state.get("voice_autoplay",True):
+                    st.session_state.pending_tts=answer
+                st.rerun()
+
     prompt=st.chat_input("여행 중 궁금한 것을 말하세요")
     if prompt:
-        st.session_state.messages.append({"role":"user","content":prompt})
-        assistant_text=traveler_reply(prompt)
-        result=observe_turn(prompt,assistant_text)
-        apply_result(result)
-        st.session_state.messages.append({"role":"assistant","content":assistant_text or "확인했습니다."})
-        st.session_state.turns.append({
-            "turn_id":str(uuid.uuid4()),
-            "occurred_at":now_iso(),
-            "user_message":prompt,
-            "assistant_message":assistant_text or "확인했습니다.",
-            "events":result.get("events") or [],
-            "journey":dict(st.session_state.journey),
-            "location":dict(st.session_state.location) if st.session_state.location else None,
-            "notion_synced":False,
-        })
-        auto_sync_notion_checkpoint()
-        persist_browser_store()
+        process_user_turn(prompt,input_mode="text")
         st.rerun()
 
 with history_tab:
