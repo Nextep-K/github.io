@@ -30,18 +30,37 @@ div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:#f7f8fa!importan
 ALLOWED_TYPES={"Intent","Deliberation","Exposure","Choice","Movement","Stay","Transaction"}
 ALLOWED_STATES={"IDLE","PLANNING","MOVING","STAYING","ENDED"}
 
-SYSTEM_PROMPT="""너는 1인용 관광 Context Pilot의 Traveler Agent이자 Observer다.
-사용자의 여행을 자연스럽게 돕되, 대화에서 관찰 가능한 사실만 구조화한다.
+TRAVELER_PROMPT="""너는 평창 여행 중 사용자를 돕는 지능형 여행 동반자다.
+
+목표:
+- 이전 대화와 현재 Journey 상태를 이어서 이해한다.
+- 사용자가 이미 말한 목적지·교통수단·출발 여부·선호를 다시 묻지 않는다.
+- 주차, 식당, 운영시간, 입장료, 행사, 교통, 실제 장소 추천처럼 외부·최신 정보가 필요한 질문에는 web_search를 스스로 사용한다.
+- 검색이 필요하면 먼저 검색하고, 충분히 답할 수 있는데도 막연한 추가 질문으로 돌리지 않는다.
+- 현재 위치 좌표와 목적지, 이동 상태를 함께 고려한다.
+- 가능한 경우 구체적인 장소명·이유·현재 맥락에 맞는 선택지를 2~4개 정도 제시한다.
+- 공식 기관·시설·신뢰도 높은 출처를 우선하고, 최신 여부가 중요한 정보는 검색 결과에 근거한다.
+- 사용자가 운전 중일 수 있어 답은 간결하게 하되, '휴대폰을 조작하지 말라' 같은 상투적 안전문구를 매번 반복하지 않는다. 실제로 즉각적인 안전 문제가 있을 때만 필요한 경고를 한다.
+- 확실하지 않은 사실을 지어내지 않는다.
+- 꼭 필요한 경우가 아니면 질문만 되돌려 보내지 말고 우선 최선의 답을 준 뒤 필요하면 한 가지 보완 질문만 한다.
+- 사용자가 '가는 중', '도착', '이제 어디 갈까'처럼 짧게 말해도 이전 대화와 Journey를 기준으로 해석한다.
+- 사용자가 관광·문화·역사 설명을 요청하면 단순 사실 나열보다 장소의 맥락과 의미를 이해하기 쉽게 설명한다.
+
+너의 응답은 사용자에게 보이는 실제 여행 안내 문장만 작성한다.
+"""
+
+OBSERVER_PROMPT="""너는 관광 행동 관찰기다. 사용자에게 답하지 말고, 한 턴의 사용자 발화와 실제 assistant 응답을 관찰하여 구조화 이벤트만 추출한다.
 
 관찰축: Intent → Deliberation → Exposure → Choice → Movement → Stay → Transaction
 
 규칙:
-1. 단일 행동을 성향으로 일반화하지 않는다.
-2. 사용자 직접 진술과 추론을 구분한다.
-3. 실제 정보를 제공하지 않았다면 Exposure를 만들지 않는다.
-4. 현재 Journey의 시간·공간 맥락을 유지한다.
-5. 필요한 정보가 빠졌으면 짧게 질문한다.
+1. 사용자 직접 진술과 추론을 구분한다.
+2. 단일 행동을 안정적 성향으로 일반화하지 않는다.
+3. assistant가 실제 장소·정보·추천을 제공한 경우에만 Exposure를 만든다.
+4. 사용자가 이미 선택했거나 결정한 것만 Choice로 만든다.
+5. 현재 Journey 상태와 이전 Event를 참고하여 상태 변화를 기록한다.
 6. state_updates의 변경 없는 문자열 값은 빈 문자열로 둔다.
+7. assistant의 설명 자체는 Choice가 아니다.
 """
 
 OUTPUT_SCHEMA={
@@ -246,16 +265,80 @@ def fallback(text):
 
     return {"assistant_text":reply,"events":events,"state_updates":updates}
 
-def interpret(text):
+def traveler_reply(text):
+    key=secret("OPENAI_API_KEY")
+    if not key or OpenAI is None:
+        return fallback(text)["assistant_text"]
+
+    context={
+        "journey":st.session_state.journey,
+        "location":st.session_state.location,
+        "conversation":st.session_state.messages[-30:],
+        "recent_events":st.session_state.events[-30:],
+        "user_message":text,
+    }
+    client=OpenAI(api_key=key)
+    primary_model=secret("TRAVELER_MODEL","gpt-6.1-sol")
+    try:
+        response=client.responses.create(
+            model=primary_model,
+            instructions=TRAVELER_PROMPT,
+            tools=[
+                {
+                    "type":"web_search",
+                    "search_context_size":"medium",
+                    "user_location":{"type":"approximate","country":"KR"},
+                }
+            ],
+            tool_choice="auto",
+            input=json.dumps(context,ensure_ascii=False),
+        )
+        answer=response.output_text.strip()
+        if not answer:
+            raise ValueError("empty traveler response")
+        return answer
+    except Exception as e:
+        # If the higher-capability traveler model is unavailable to this API project,
+        # retry with the low-cost model already configured for the pilot.
+        try:
+            response=client.responses.create(
+                model=secret("OPENAI_MODEL","gpt-6-luna"),
+                instructions=TRAVELER_PROMPT,
+                tools=[
+                    {
+                        "type":"web_search",
+                        "search_context_size":"medium",
+                        "user_location":{"type":"approximate","country":"KR"},
+                    }
+                ],
+                tool_choice="auto",
+                input=json.dumps(context,ensure_ascii=False),
+            )
+            answer=response.output_text.strip()
+            if answer:
+                return answer
+        except Exception:
+            pass
+        st.toast(f"AI 안내 호출 실패 — 규칙 기반 응답: {type(e).__name__}")
+        return fallback(text)["assistant_text"]
+
+def observe_turn(text, assistant_text):
     key=secret("OPENAI_API_KEY")
     if not key or OpenAI is None:
         return fallback(text)
-    payload={"journey":st.session_state.journey,"location":st.session_state.location,"recent_messages":st.session_state.messages[-8:],"user_message":text}
+
+    payload={
+        "journey":st.session_state.journey,
+        "location":st.session_state.location,
+        "recent_events":st.session_state.events[-30:],
+        "user_message":text,
+        "assistant_message":assistant_text,
+    }
     try:
         client=OpenAI(api_key=key)
         response=client.responses.create(
-            model=secret("OPENAI_MODEL","gpt-6-luna"),
-            instructions=SYSTEM_PROMPT,
+            model=secret("OBSERVER_MODEL",secret("OPENAI_MODEL","gpt-6-luna")),
+            instructions=OBSERVER_PROMPT,
             input=json.dumps(payload,ensure_ascii=False),
             text={
                 "format":{
@@ -266,14 +349,12 @@ def interpret(text):
                 }
             },
         )
-        raw=response.output_text.strip()
-        raw=re.sub(r"^\x60\x60\x60(?:json)?\s*|\s*\x60\x60\x60$","",raw)
-        result=json.loads(raw)
-        if not isinstance(result,dict) or "assistant_text" not in result:
-            raise ValueError("invalid model output")
+        result=json.loads(response.output_text.strip())
+        if not isinstance(result,dict) or "events" not in result:
+            raise ValueError("invalid observer output")
         return result
     except Exception as e:
-        st.toast(f"LLM 호출 실패 — 규칙 기반 처리: {type(e).__name__}")
+        st.toast(f"Event 추출 실패 — 규칙 기반 보정: {type(e).__name__}")
         return fallback(text)
 
 def apply_result(result):
@@ -384,7 +465,7 @@ b.metric("목적지",j["destination"] or "—")
 c.metric("지출",f'{j["spend_krw"]:,}원')
 ai_ready=bool(secret("OPENAI_API_KEY"))
 notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
-st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · Notion: {"연결됨" if notion_ready else "대기"} · 브라우저 백업: 켜짐')
+st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"연결됨" if notion_ready else "대기"} · 브라우저 백업: 켜짐')
 
 chat_tab,admin_tab=st.tabs(["대화","관리자"])
 
@@ -402,9 +483,10 @@ with chat_tab:
     prompt=st.chat_input("여행 중 궁금한 것을 말하세요")
     if prompt:
         st.session_state.messages.append({"role":"user","content":prompt})
-        result=interpret(prompt)
+        assistant_text=traveler_reply(prompt)
+        result=observe_turn(prompt,assistant_text)
         apply_result(result)
-        st.session_state.messages.append({"role":"assistant","content":result.get("assistant_text") or "확인했습니다."})
+        st.session_state.messages.append({"role":"assistant","content":assistant_text or "확인했습니다."})
         backup_browser_state()
         st.rerun()
 
