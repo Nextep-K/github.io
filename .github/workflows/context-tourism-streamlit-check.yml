@@ -32,3 +32,6 @@ jobs:
         run: python -c "import streamlit, openai, notion_client, streamlit_js_eval; print('imports ok')"
       - name: Regression tests
         run: python -m unittest discover -s context-tourism-streamlit/tests -p "test_*.py" -v
+      - name: Public Streamlit deployment probe (non-blocking)
+        continue-on-error: true
+        run: python context-tourism-streamlit/tests/probe_deployment.py
