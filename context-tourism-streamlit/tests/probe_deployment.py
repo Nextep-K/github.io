@@ -3,16 +3,32 @@ from __future__ import annotations
 
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit, parse_qsl
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None
+
+OPENER = build_opener(NoRedirect)
 
 BASE = "https://appio-cf7w2tss4hxwxqd82wmkka.streamlit.app/"
 
 
 def fetch(url: str):
     request = Request(url, headers={"User-Agent": "ContextTourismPilotHealthCheck/1.0"})
-    with urlopen(request, timeout=25) as response:
-        body = response.read(150000).decode("utf-8", "replace")
-        return response.status, response.geturl(), body
+    try:
+        response=OPENER.open(request, timeout=25)
+    except HTTPError as exc:
+        response=exc
+    with response:
+        body=response.read(150000).decode("utf-8","replace")
+        redirect=response.headers.get("Location")
+        if redirect:
+            parsed=urlsplit(redirect)
+            print(f"Redirect HTTP {response.code} -> {parsed.scheme}://{parsed.netloc}{parsed.path}")
+            print(f"Redirect query parameter keys: {[k for k,_ in parse_qsl(parsed.query)]}")
+        return response.code, response.geturl(), body
 
 
 def main():
