@@ -48,6 +48,8 @@ TRAVELER_PROMPT="""너는 평창 여행 중 사용자를 돕는 지능형 여행
 - 사용자가 '가는 중', '도착', '이제 어디 갈까'처럼 짧게 말해도 이전 대화와 Journey를 기준으로 해석한다.
 - 사용자가 관광·문화·역사 설명을 요청하면 단순 사실 나열보다 장소의 맥락과 의미를 이해하기 쉽게 설명한다.
 
+- 식사·휴식·피로·화장실 등 생활리듬을 실제 발화와 현재 시간·위치에 맞춰 고려한다. 직접 확인되지 않은 욕구를 사실로 단정하지 않는다.
+
 너의 응답은 사용자에게 보이는 실제 여행 안내 문장만 작성한다.
 """
 
@@ -517,22 +519,50 @@ def handle_voice_control_command(prompt):
 
     return False
 
-def process_user_turn(prompt, input_mode="text"):
+def track_rhythm_context(prompt, occurred_at, location):
+    # A situational need is not a stable personal preference.
+    patterns={
+        "meal":("배고파","밥 먹고","식사하고","점심 먹","저녁 먹"),
+        "rest":("쉬고 싶","휴식하고 싶","좀 쉬자","잠깐 쉬"),
+        "fatigue":("피곤","지쳤","졸려","졸음"),
+        "toilet":("화장실","용변"),
+    }
+    signals=st.session_state.journey.setdefault("rhythm_signals",[])
+    for kind,phrases in patterns.items():
+        if any(term in prompt for term in phrases):
+            signals.append({"kind":kind,"source":"explicit","occurred_at":occurred_at,
+                            "location":dict(location) if location else None,
+                            "user_text":prompt[:500]})
+    if len(signals)>100:
+        del signals[:-100]
+
+
+def process_user_turn(prompt, input_mode="text", occurred_at=None):
+    occurred_at=occurred_at or now_iso()
+    location_at_input=dict(st.session_state.location) if st.session_state.location else None
+    track_rhythm_context(prompt,occurred_at,location_at_input)
     st.session_state.messages.append({"role":"user","content":prompt})
     assistant_text=traveler_reply(prompt)
+    assistant_completed_at=now_iso()
     result=observe_turn(prompt,assistant_text)
-    apply_result(result)
+    apply_result(result,user_occurred_at=occurred_at,
+                 assistant_occurred_at=assistant_completed_at,
+                 event_location=location_at_input)
     answer=assistant_text or "확인했습니다."
     st.session_state.messages.append({"role":"assistant","content":answer})
     st.session_state.turns.append({
         "turn_id":str(uuid.uuid4()),
-        "occurred_at":now_iso(),
+        "occurred_at":occurred_at,
+        "processed_at":now_iso(),
+        "web_search_required":bool(st.session_state.last_web_search_required),
+        "web_search_used":bool(st.session_state.last_web_search_used),
         "input_mode":input_mode,
         "user_message":prompt,
         "assistant_message":answer,
         "events":result.get("events") or [],
         "journey":dict(st.session_state.journey),
-        "location":dict(st.session_state.location) if st.session_state.location else None,
+        "location":location_at_input,
+        "rhythm_signals":list(st.session_state.journey.get("rhythm_signals",[])[-5:]),
         "notion_synced":False,
     })
     auto_sync_notion_checkpoint()
@@ -868,6 +898,7 @@ with chat_tab:
         audio_bytes=audio_value.getvalue()
         digest=hashlib.sha256(audio_bytes).hexdigest() if audio_bytes else None
         if digest and digest!=st.session_state.get("last_audio_digest"):
+            audio_received_at=now_iso()
             st.session_state.last_audio_digest=digest
             with st.spinner("음성을 듣고 있습니다…"):
                 voice_text=transcribe_audio(audio_value)
@@ -876,7 +907,7 @@ with chat_tab:
                 if handle_voice_control_command(voice_text):
                     persist_browser_store()
                     st.rerun()
-                answer=process_user_turn(voice_text,input_mode="voice")
+                answer=process_user_turn(voice_text,input_mode="voice",occurred_at=audio_received_at)
                 if st.session_state.get("voice_autoplay",False):
                     st.session_state.pending_tts=answer
                 st.rerun()
