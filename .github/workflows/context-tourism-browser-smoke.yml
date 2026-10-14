@@ -1,0 +1,52 @@
+name: Streamlit Public Browser Smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["main"]
+    paths:
+      - ".github/workflows/context-tourism-browser-smoke.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  browser-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Chromium browser test
+        run: |
+          pip install "playwright>=1.55,<2"
+          python -m playwright install chromium
+      - name: Load public Streamlit app in real Chromium browser
+        run: |
+          python - <<'PY'
+          import sys
+          from playwright.sync_api import sync_playwright
+          url="https://appio-cf7w2tss4hxwxqd82wmkka.streamlit.app/"
+          with sync_playwright() as playwright:
+              browser=playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+              context=browser.new_context(locale="ko-KR", timezone_id="Asia/Seoul")
+              page=context.new_page()
+              try:
+                  response=page.goto(url,wait_until="domcontentloaded",timeout=120000)
+                  print(f"HTTP: {response.status if response else 'no response'}",flush=True)
+                  print(f"Browser final URL: {page.url}",flush=True)
+                  print(f"Page title: {page.title()}",flush=True)
+                  page.get_by_text("Context Tourism Pilot",exact=False).first.wait_for(timeout=120000)
+                  print("RESULT: PUBLIC_BROWSER_UI_LOADED",flush=True)
+                  for tab in ("대화","지난 Journey","관리자"):
+                      print(f"Tab {tab} present: {page.get_by_text(tab, exact=True).count()>0}",flush=True)
+              except Exception as exc:
+                  print(f"RESULT: PUBLIC_BROWSER_UNVERIFIED: {type(exc).__name__}: {exc}",flush=True)
+                  print(f"Final URL: {page.url}",flush=True)
+                  print(f"Visible text excerpt: {page.locator('body').inner_text(timeout=3000)[:650]!r}",flush=True)
+                  sys.exit(1)
+              finally:
+                  browser.close()
+          PY
