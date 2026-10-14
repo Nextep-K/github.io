@@ -40,6 +40,9 @@ def main():
         if "login" in final_url.lower() or "auth" in final_url.lower():
             print("RESULT: LOGIN_REQUIRED (not a publicly open app)")
             return 2
+        if status in (301, 302, 303, 307, 308):
+            print("RESULT: BROWSER_AUTH_HANDSHAKE_REQUIRED (non-browser client cannot determine app health)")
+            return 0
         if status != 200:
             print("RESULT: UNAVAILABLE")
             return 3
