@@ -3,6 +3,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 from streamlit_js_eval import get_geolocation, streamlit_js_eval
@@ -101,7 +102,7 @@ OUTPUT_SCHEMA={
 }
 
 def now_iso():
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Seoul")).isoformat(timespec="seconds")
 
 def secret(name, default=None):
     try:
@@ -121,6 +122,7 @@ def blank_journey():
         "destination":None,
         "transport":None,
         "spend_krw":0,
+        "rhythm_signals":[],
         "created_at":now_iso(),
         "started_at":None,
         "ended_at":None,
@@ -145,6 +147,9 @@ def init_state():
         "pending_tts":None,
         "tts_counter":0,
         "voice_autoplay":False,
+        "voice_toggle_sync_pending":False,
+        "last_web_search_used":False,
+        "last_web_search_required":False,
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -179,6 +184,7 @@ def normalize_saved_payload(payload):
     if not isinstance(j,dict):
         return None
     j.setdefault("created_at", j.get("started_at") or now_iso())
+    j.setdefault("rhythm_signals", [])
     j.setdefault("notion_synced_at",None)
     j.setdefault("notion_journey_page_id",None)
     j.setdefault("notion_report_page_id",None)
@@ -484,7 +490,7 @@ def handle_voice_control_command(prompt):
     on_terms=("이제부터읽어줘","계속읽어줘","자동으로읽어줘","음성안내켜","음성모드켜")
     if any(term in t for term in on_terms):
         st.session_state.voice_autoplay=True
-        st.session_state["voice_autoplay_toggle"]=True
+        st.session_state.voice_toggle_sync_pending=True
         confirm="음성 안내 모드로 전환했습니다. 이후 답변을 소리 내어 읽겠습니다."
         st.session_state.messages.append({"role":"assistant","content":confirm})
         st.session_state.pending_tts=confirm
@@ -494,7 +500,7 @@ def handle_voice_control_command(prompt):
     off_terms=("읽지마","그만읽어","음성안내꺼","음성모드꺼","자동읽기꺼")
     if any(term in t for term in off_terms):
         st.session_state.voice_autoplay=False
-        st.session_state["voice_autoplay_toggle"]=False
+        st.session_state.voice_toggle_sync_pending=True
         confirm="음성 안내를 껐습니다. 이후 답변은 화면에만 표시합니다."
         st.session_state.messages.append({"role":"assistant","content":confirm})
         st.toast("음성 안내 OFF")
@@ -644,7 +650,13 @@ def apply_result(result):
             add_event(e.get("type"),e.get("subtype",""),e.get("detail",""),e.get("explicit_or_inferred","inferred"),e.get("confidence",0.5))
 
 def rich(value):
-    return {"rich_text":[{"type":"text","text":{"content":str(value)[:1900]}}]}
+    # A Notion rich_text object has a 2,000-character text limit.
+    # Chunk long raw evidence instead of silently truncating it.
+    value=str(value)
+    chunks=[value[i:i+1800] for i in range(0,len(value),1800)] or [""]
+    if len(chunks)>100:
+        raise ValueError("Notion rich_text item count exceeded; raw evidence remains in browser storage")
+    return {"rich_text":[{"type":"text","text":{"content":chunk}} for chunk in chunks]}
 
 def title(value):
     return {"title":[{"type":"text","text":{"content":str(value)[:1900]}}]}
@@ -776,7 +788,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.8")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -823,6 +835,8 @@ with chat_tab:
             help="마이크를 누르고 말한 뒤 녹음을 마치면 자동으로 질문으로 전송합니다.",
         )
     with voice_cols[1]:
+        if st.session_state.pop("voice_toggle_sync_pending",False):
+            st.session_state["voice_autoplay_toggle"]=bool(st.session_state.voice_autoplay)
         st.session_state.voice_autoplay=st.toggle(
             "음성 안내",
             value=st.session_state.get("voice_autoplay",False),
