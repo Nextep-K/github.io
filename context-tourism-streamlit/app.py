@@ -577,7 +577,8 @@ def requires_web_search(text):
 
 
 def response_searched_web(response):
-    return any(getattr(item,"type",None)=="web_search_call"
+    return any(getattr(item,"type",None)=="web_search_call" and
+               getattr(item,"status",None)=="completed"
                for item in (getattr(response,"output",None) or []))
 
 
@@ -739,7 +740,7 @@ def sync_notion_checkpoint(finalize=False):
 
     notion=NotionClient(auth=token)
     j=st.session_state.journey
-    d=datetime.now().date().isoformat()
+    d=datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
     summary=f'{j.get("origin") or "현재 위치"} → {j.get("destination") or "미정"} / {j.get("transport") or "미정"} / {len(st.session_state.events)} events'
 
     props={
@@ -865,7 +866,7 @@ b.metric("목적지",j["destination"] or "—")
 c.metric("지출",f'{j["spend_krw"]:,}원')
 ai_ready=bool(secret("OPENAI_API_KEY"))
 notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
-st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"자동저장" if notion_ready else "대기"} · Journey 저장: 자동')
+st.caption(f'AI: {"API 키 설정됨" if ai_ready else "규칙 모드"} · 웹검색: {"질문별 실행 확인" if ai_ready else "꺼짐"} · Notion: {"자동저장 설정됨" if notion_ready else "대기"} · Journey 저장: 브라우저')
 if st.session_state.get("admin_authenticated"):
     if st.button("관리자 잠금",key="lock_admin"):
         st.session_state.admin_authenticated=False
