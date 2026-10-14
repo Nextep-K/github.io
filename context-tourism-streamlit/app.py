@@ -3,6 +3,7 @@ import json
 import re
 import uuid
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import streamlit as st
 from streamlit_js_eval import get_geolocation, streamlit_js_eval
@@ -47,6 +48,8 @@ TRAVELER_PROMPT="""너는 평창 여행 중 사용자를 돕는 지능형 여행
 - 사용자가 '가는 중', '도착', '이제 어디 갈까'처럼 짧게 말해도 이전 대화와 Journey를 기준으로 해석한다.
 - 사용자가 관광·문화·역사 설명을 요청하면 단순 사실 나열보다 장소의 맥락과 의미를 이해하기 쉽게 설명한다.
 
+- 식사·휴식·피로·화장실 등 생활리듬을 실제 발화와 현재 시간·위치에 맞춰 고려한다. 직접 확인되지 않은 욕구를 사실로 단정하지 않는다.
+
 너의 응답은 사용자에게 보이는 실제 여행 안내 문장만 작성한다.
 """
 
@@ -62,6 +65,8 @@ OBSERVER_PROMPT="""너는 관광 행동 관찰기다. 사용자에게 답하지 
 5. 현재 Journey 상태와 이전 Event를 참고하여 상태 변화를 기록한다.
 6. state_updates의 변경 없는 문자열 값은 빈 문자열로 둔다.
 7. assistant의 설명 자체는 Choice가 아니다.
+8. 금액이 언급되어도 결제·지출이 확정되지 않으면 Transaction이나 spend_delta를 생성하지 않는다.
+9. 목적지 선택과 실제 도착을 구분한다.
 """
 
 OUTPUT_SCHEMA={
@@ -101,7 +106,7 @@ OUTPUT_SCHEMA={
 }
 
 def now_iso():
-    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).astimezone(ZoneInfo("Asia/Seoul")).isoformat(timespec="seconds")
 
 def secret(name, default=None):
     try:
@@ -121,6 +126,7 @@ def blank_journey():
         "destination":None,
         "transport":None,
         "spend_krw":0,
+        "rhythm_signals":[],
         "created_at":now_iso(),
         "started_at":None,
         "ended_at":None,
@@ -145,6 +151,9 @@ def init_state():
         "pending_tts":None,
         "tts_counter":0,
         "voice_autoplay":False,
+        "voice_toggle_sync_pending":False,
+        "last_web_search_used":False,
+        "last_web_search_required":False,
     }
     for k,v in defaults.items():
         if k not in st.session_state:
@@ -179,6 +188,7 @@ def normalize_saved_payload(payload):
     if not isinstance(j,dict):
         return None
     j.setdefault("created_at", j.get("started_at") or now_iso())
+    j.setdefault("rhythm_signals", [])
     j.setdefault("notion_synced_at",None)
     j.setdefault("notion_journey_page_id",None)
     j.setdefault("notion_report_page_id",None)
@@ -319,23 +329,23 @@ def journey_route_label(payload):
 
 def snapshot():
     j=st.session_state.journey
-    return {"captured_at":now_iso(),"journey_state":j["state"],"origin":j["origin"],"destination":j["destination"],"transport":j["transport"],"spend_krw":j["spend_krw"],"location":st.session_state.location}
+    return {"captured_at":now_iso(),"journey_state":j["state"],"origin":j["origin"],"destination":j["destination"],"transport":j["transport"],"spend_krw":j["spend_krw"],"location":st.session_state.location,"rhythm_signals":j.get("rhythm_signals",[])[-5:]}
 
-def add_event(event_type, subtype="", detail="", explicit_or_inferred="explicit", confidence=1.0):
+def add_event(event_type, subtype="", detail="", explicit_or_inferred="explicit", confidence=1.0, occurred_at=None, location_override=None):
     if event_type not in ALLOWED_TYPES:
         return
     prev=st.session_state.events[-1]["event_id"] if st.session_state.events else None
     st.session_state.events.append({
         "event_id":str(uuid.uuid4()),
         "journey_id":st.session_state.journey["id"],
-        "occurred_at":now_iso(),
+        "occurred_at":occurred_at or now_iso(),
         "recorded_at":now_iso(),
         "type":event_type,
         "subtype":subtype,
         "detail":detail,
         "explicit_or_inferred":explicit_or_inferred if explicit_or_inferred in {"explicit","inferred"} else "inferred",
         "confidence":max(0.0,min(float(confidence or 0),1.0)),
-        "location":st.session_state.location,
+        "location":location_override if location_override is not None else st.session_state.location,
         "previous_event_id":prev,
         "context":snapshot(),
     })
@@ -360,6 +370,13 @@ def update_location(raw):
             add_event("Movement","location_update",key,"explicit",1.0)
 
 def parse_money(text):
+    # An amount mentioned in a question is not an actual transaction.
+    spending_terms=("결제했","결제함","지출했","썼어","썼다","지불했","계산했",
+                    "구매했","샀어","샀다","냈어","냈다")
+    if not any(term in text for term in spending_terms):
+        return 0
+    if any(term in text for term in ("얼마","가격","요금","예산","예상","살까","사려","지출할")):
+        return 0
     t=text.replace(",","")
     m=re.search(r"(\d+(?:\.\d+)?)\s*만\s*원",t)
     if m:
@@ -484,7 +501,7 @@ def handle_voice_control_command(prompt):
     on_terms=("이제부터읽어줘","계속읽어줘","자동으로읽어줘","음성안내켜","음성모드켜")
     if any(term in t for term in on_terms):
         st.session_state.voice_autoplay=True
-        st.session_state["voice_autoplay_toggle"]=True
+        st.session_state.voice_toggle_sync_pending=True
         confirm="음성 안내 모드로 전환했습니다. 이후 답변을 소리 내어 읽겠습니다."
         st.session_state.messages.append({"role":"assistant","content":confirm})
         st.session_state.pending_tts=confirm
@@ -494,7 +511,7 @@ def handle_voice_control_command(prompt):
     off_terms=("읽지마","그만읽어","음성안내꺼","음성모드꺼","자동읽기꺼")
     if any(term in t for term in off_terms):
         st.session_state.voice_autoplay=False
-        st.session_state["voice_autoplay_toggle"]=False
+        st.session_state.voice_toggle_sync_pending=True
         confirm="음성 안내를 껐습니다. 이후 답변은 화면에만 표시합니다."
         st.session_state.messages.append({"role":"assistant","content":confirm})
         st.toast("음성 안내 OFF")
@@ -502,29 +519,74 @@ def handle_voice_control_command(prompt):
 
     return False
 
-def process_user_turn(prompt, input_mode="text"):
+def track_rhythm_context(prompt, occurred_at, location):
+    # A situational need is not a stable personal preference.
+    patterns={
+        "meal":("배고파","밥 먹고","식사하고","점심 먹","저녁 먹"),
+        "rest":("쉬고 싶","휴식하고 싶","좀 쉬자","잠깐 쉬"),
+        "fatigue":("피곤","지쳤","졸려","졸음"),
+        "toilet":("화장실","용변"),
+    }
+    signals=st.session_state.journey.setdefault("rhythm_signals",[])
+    for kind,phrases in patterns.items():
+        if any(term in prompt for term in phrases):
+            signals.append({"kind":kind,"source":"explicit","occurred_at":occurred_at,
+                            "location":dict(location) if location else None,
+                            "user_text":prompt[:500]})
+    if len(signals)>100:
+        del signals[:-100]
+
+
+def process_user_turn(prompt, input_mode="text", occurred_at=None):
+    occurred_at=occurred_at or now_iso()
+    location_at_input=dict(st.session_state.location) if st.session_state.location else None
+    track_rhythm_context(prompt,occurred_at,location_at_input)
     st.session_state.messages.append({"role":"user","content":prompt})
     assistant_text=traveler_reply(prompt)
+    assistant_completed_at=now_iso()
     result=observe_turn(prompt,assistant_text)
-    apply_result(result)
+    event_start=len(st.session_state.events)
+    apply_result(result,user_occurred_at=occurred_at,
+                 assistant_occurred_at=assistant_completed_at,
+                 event_location=location_at_input)
     answer=assistant_text or "확인했습니다."
     st.session_state.messages.append({"role":"assistant","content":answer})
     st.session_state.turns.append({
         "turn_id":str(uuid.uuid4()),
-        "occurred_at":now_iso(),
+        "occurred_at":occurred_at,
+        "processed_at":now_iso(),
+        "web_search_required":bool(st.session_state.last_web_search_required),
+        "web_search_used":bool(st.session_state.last_web_search_used),
         "input_mode":input_mode,
         "user_message":prompt,
         "assistant_message":answer,
-        "events":result.get("events") or [],
+        "events":list(st.session_state.events[event_start:]),
+        "observer_events":result.get("events") or [],
         "journey":dict(st.session_state.journey),
-        "location":dict(st.session_state.location) if st.session_state.location else None,
+        "location":location_at_input,
+        "rhythm_signals":list(st.session_state.journey.get("rhythm_signals",[])[-5:]),
         "notion_synced":False,
     })
     auto_sync_notion_checkpoint()
     persist_browser_store()
     return answer
 
+def requires_web_search(text):
+    keywords=("식당","맛집","주차","영업","운영시간","입장료","요금",
+              "교통","경로","축제","행사","검색","추천","근처",
+              "날씨","예약","소요시간","공식","최신")
+    return any(term in text for term in keywords)
+
+
+def response_searched_web(response):
+    return any(getattr(item,"type",None)=="web_search_call" and
+               getattr(item,"status",None)=="completed"
+               for item in (getattr(response,"output",None) or []))
+
+
 def traveler_reply(text):
+    st.session_state.last_web_search_required=requires_web_search(text)
+    st.session_state.last_web_search_used=False
     key=secret("OPENAI_API_KEY")
     if not key or OpenAI is None:
         return fallback(text)["assistant_text"]
@@ -549,9 +611,12 @@ def traveler_reply(text):
                     "user_location":{"type":"approximate","country":"KR"},
                 }
             ],
-            tool_choice="auto",
+            tool_choice="required" if st.session_state.last_web_search_required else "auto",
             input=json.dumps(context,ensure_ascii=False),
         )
+        st.session_state.last_web_search_used=response_searched_web(response)
+        if st.session_state.last_web_search_required and not st.session_state.last_web_search_used:
+            raise RuntimeError("required web search was not executed")
         answer=response.output_text.strip()
         if not answer:
             raise ValueError("empty traveler response")
@@ -570,15 +635,20 @@ def traveler_reply(text):
                         "user_location":{"type":"approximate","country":"KR"},
                     }
                 ],
-                tool_choice="auto",
+                tool_choice="required" if st.session_state.last_web_search_required else "auto",
                 input=json.dumps(context,ensure_ascii=False),
             )
+            st.session_state.last_web_search_used=response_searched_web(response)
+            if st.session_state.last_web_search_required and not st.session_state.last_web_search_used:
+                raise RuntimeError("required web search was not executed")
             answer=response.output_text.strip()
             if answer:
                 return answer
         except Exception:
             pass
         st.toast(f"AI 안내 호출 실패 — 규칙 기반 응답: {type(e).__name__}")
+        if st.session_state.last_web_search_required:
+            return "현재 실시간 검색을 완료하지 못했습니다. 최신 영업·요금·예약 정보는 확인되지 않아 확정해서 안내할 수 없습니다."
         return fallback(text)["assistant_text"]
 
 def observe_turn(text, assistant_text):
@@ -616,7 +686,7 @@ def observe_turn(text, assistant_text):
         st.toast(f"Event 추출 실패 — 규칙 기반 보정: {type(e).__name__}")
         return fallback(text)
 
-def apply_result(result):
+def apply_result(result, user_occurred_at=None, assistant_occurred_at=None, event_location=None):
     j=st.session_state.journey
     j.setdefault("created_at",now_iso())
     j.setdefault("notion_synced_at",None)
@@ -632,7 +702,13 @@ def apply_result(result):
         j["state"]=state
     for k in ("origin","destination","transport"):
         if u.get(k):
-            j[k]=u[k]
+            value=u[k]
+            if k=="transport":
+                transport_map={"자가용":"car","승용차":"car","자동차":"car",
+                               "내 차":"car","도보":"walk","걷기":"walk",
+                               "버스":"bus","택시":"taxi"}
+                value=transport_map.get(value,value)
+            j[k]=value
     try:
         delta=int(u.get("spend_delta") or 0)
     except Exception:
@@ -641,10 +717,17 @@ def apply_result(result):
         j["spend_krw"]+=delta
     for e in result.get("events") or []:
         if isinstance(e,dict):
-            add_event(e.get("type"),e.get("subtype",""),e.get("detail",""),e.get("explicit_or_inferred","inferred"),e.get("confidence",0.5))
+            happened=assistant_occurred_at if e.get("type")=="Exposure" else user_occurred_at
+            add_event(e.get("type"),e.get("subtype",""),e.get("detail",""),e.get("explicit_or_inferred","inferred"),e.get("confidence",0.5),occurred_at=happened,location_override=event_location)
 
 def rich(value):
-    return {"rich_text":[{"type":"text","text":{"content":str(value)[:1900]}}]}
+    # A Notion rich_text object has a 2,000-character text limit.
+    # Chunk long raw evidence instead of silently truncating it.
+    value=str(value)
+    chunks=[value[i:i+1800] for i in range(0,len(value),1800)] or [""]
+    if len(chunks)>100:
+        raise ValueError("Notion rich_text item count exceeded; raw evidence remains in browser storage")
+    return {"rich_text":[{"type":"text","text":{"content":chunk}} for chunk in chunks]}
 
 def title(value):
     return {"title":[{"type":"text","text":{"content":str(value)[:1900]}}]}
@@ -659,7 +742,7 @@ def sync_notion_checkpoint(finalize=False):
 
     notion=NotionClient(auth=token)
     j=st.session_state.journey
-    d=datetime.now().date().isoformat()
+    d=datetime.now(ZoneInfo("Asia/Seoul")).date().isoformat()
     summary=f'{j.get("origin") or "현재 위치"} → {j.get("destination") or "미정"} / {j.get("transport") or "미정"} / {len(st.session_state.events)} events'
 
     props={
@@ -776,7 +859,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.8")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -785,7 +868,7 @@ b.metric("목적지",j["destination"] or "—")
 c.metric("지출",f'{j["spend_krw"]:,}원')
 ai_ready=bool(secret("OPENAI_API_KEY"))
 notion_ready=all([secret("NOTION_TOKEN"),secret("NOTION_JOURNEY_DATA_SOURCE_ID"),secret("NOTION_REPORT_DATA_SOURCE_ID")])
-st.caption(f'AI: {"연결됨" if ai_ready else "규칙 모드"} · 웹검색: {"자동" if ai_ready else "꺼짐"} · Notion: {"자동저장" if notion_ready else "대기"} · Journey 저장: 자동')
+st.caption(f'AI: {"API 키 설정됨" if ai_ready else "규칙 모드"} · 웹검색: {"질문별 실행 확인" if ai_ready else "꺼짐"} · Notion: {"자동저장 설정됨" if notion_ready else "대기"} · Journey 저장: 브라우저')
 if st.session_state.get("admin_authenticated"):
     if st.button("관리자 잠금",key="lock_admin"):
         st.session_state.admin_authenticated=False
@@ -823,6 +906,8 @@ with chat_tab:
             help="마이크를 누르고 말한 뒤 녹음을 마치면 자동으로 질문으로 전송합니다.",
         )
     with voice_cols[1]:
+        if st.session_state.pop("voice_toggle_sync_pending",False):
+            st.session_state["voice_autoplay_toggle"]=bool(st.session_state.voice_autoplay)
         st.session_state.voice_autoplay=st.toggle(
             "음성 안내",
             value=st.session_state.get("voice_autoplay",False),
@@ -838,6 +923,7 @@ with chat_tab:
         audio_bytes=audio_value.getvalue()
         digest=hashlib.sha256(audio_bytes).hexdigest() if audio_bytes else None
         if digest and digest!=st.session_state.get("last_audio_digest"):
+            audio_received_at=now_iso()
             st.session_state.last_audio_digest=digest
             with st.spinner("음성을 듣고 있습니다…"):
                 voice_text=transcribe_audio(audio_value)
@@ -846,7 +932,7 @@ with chat_tab:
                 if handle_voice_control_command(voice_text):
                     persist_browser_store()
                     st.rerun()
-                answer=process_user_turn(voice_text,input_mode="voice")
+                answer=process_user_turn(voice_text,input_mode="voice",occurred_at=audio_received_at)
                 if st.session_state.get("voice_autoplay",False):
                     st.session_state.pending_tts=answer
                 st.rerun()
