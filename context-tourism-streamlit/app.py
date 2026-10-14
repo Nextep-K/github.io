@@ -63,6 +63,8 @@ OBSERVER_PROMPT="""너는 관광 행동 관찰기다. 사용자에게 답하지 
 5. 현재 Journey 상태와 이전 Event를 참고하여 상태 변화를 기록한다.
 6. state_updates의 변경 없는 문자열 값은 빈 문자열로 둔다.
 7. assistant의 설명 자체는 Choice가 아니다.
+8. 금액이 언급되어도 결제·지출이 확정되지 않으면 Transaction이나 spend_delta를 생성하지 않는다.
+9. 목적지 선택과 실제 도착을 구분한다.
 """
 
 OUTPUT_SCHEMA={
@@ -325,23 +327,23 @@ def journey_route_label(payload):
 
 def snapshot():
     j=st.session_state.journey
-    return {"captured_at":now_iso(),"journey_state":j["state"],"origin":j["origin"],"destination":j["destination"],"transport":j["transport"],"spend_krw":j["spend_krw"],"location":st.session_state.location}
+    return {"captured_at":now_iso(),"journey_state":j["state"],"origin":j["origin"],"destination":j["destination"],"transport":j["transport"],"spend_krw":j["spend_krw"],"location":st.session_state.location,"rhythm_signals":j.get("rhythm_signals",[])[-5:]}
 
-def add_event(event_type, subtype="", detail="", explicit_or_inferred="explicit", confidence=1.0):
+def add_event(event_type, subtype="", detail="", explicit_or_inferred="explicit", confidence=1.0, occurred_at=None, location_override=None):
     if event_type not in ALLOWED_TYPES:
         return
     prev=st.session_state.events[-1]["event_id"] if st.session_state.events else None
     st.session_state.events.append({
         "event_id":str(uuid.uuid4()),
         "journey_id":st.session_state.journey["id"],
-        "occurred_at":now_iso(),
+        "occurred_at":occurred_at or now_iso(),
         "recorded_at":now_iso(),
         "type":event_type,
         "subtype":subtype,
         "detail":detail,
         "explicit_or_inferred":explicit_or_inferred if explicit_or_inferred in {"explicit","inferred"} else "inferred",
         "confidence":max(0.0,min(float(confidence or 0),1.0)),
-        "location":st.session_state.location,
+        "location":location_override if location_override is not None else st.session_state.location,
         "previous_event_id":prev,
         "context":snapshot(),
     })
@@ -366,6 +368,13 @@ def update_location(raw):
             add_event("Movement","location_update",key,"explicit",1.0)
 
 def parse_money(text):
+    # An amount mentioned in a question is not an actual transaction.
+    spending_terms=("결제했","결제함","지출했","썼어","썼다","지불했","계산했",
+                    "구매했","샀어","샀다","냈어","냈다")
+    if not any(term in text for term in spending_terms):
+        return 0
+    if any(term in text for term in ("얼마","가격","요금","예산","예상","살까","사려","지출할")):
+        return 0
     t=text.replace(",","")
     m=re.search(r"(\d+(?:\.\d+)?)\s*만\s*원",t)
     if m:
@@ -622,7 +631,7 @@ def observe_turn(text, assistant_text):
         st.toast(f"Event 추출 실패 — 규칙 기반 보정: {type(e).__name__}")
         return fallback(text)
 
-def apply_result(result):
+def apply_result(result, user_occurred_at=None, assistant_occurred_at=None, event_location=None):
     j=st.session_state.journey
     j.setdefault("created_at",now_iso())
     j.setdefault("notion_synced_at",None)
@@ -638,7 +647,13 @@ def apply_result(result):
         j["state"]=state
     for k in ("origin","destination","transport"):
         if u.get(k):
-            j[k]=u[k]
+            value=u[k]
+            if k=="transport":
+                transport_map={"자가용":"car","승용차":"car","자동차":"car",
+                               "내 차":"car","도보":"walk","걷기":"walk",
+                               "버스":"bus","택시":"taxi"}
+                value=transport_map.get(value,value)
+            j[k]=value
     try:
         delta=int(u.get("spend_delta") or 0)
     except Exception:
@@ -647,7 +662,8 @@ def apply_result(result):
         j["spend_krw"]+=delta
     for e in result.get("events") or []:
         if isinstance(e,dict):
-            add_event(e.get("type"),e.get("subtype",""),e.get("detail",""),e.get("explicit_or_inferred","inferred"),e.get("confidence",0.5))
+            happened=assistant_occurred_at if e.get("type")=="Exposure" else user_occurred_at
+            add_event(e.get("type"),e.get("subtype",""),e.get("detail",""),e.get("explicit_or_inferred","inferred"),e.get("confidence",0.5),occurred_at=happened,location_override=event_location)
 
 def rich(value):
     # A Notion rich_text object has a 2,000-character text limit.
