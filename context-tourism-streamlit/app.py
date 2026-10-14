@@ -569,7 +569,21 @@ def process_user_turn(prompt, input_mode="text", occurred_at=None):
     persist_browser_store()
     return answer
 
+def requires_web_search(text):
+    keywords=("식당","맛집","주차","영업","운영시간","입장료","요금",
+              "교통","경로","축제","행사","검색","추천","근처",
+              "날씨","예약","소요시간","공식","최신")
+    return any(term in text for term in keywords)
+
+
+def response_searched_web(response):
+    return any(getattr(item,"type",None)=="web_search_call"
+               for item in (getattr(response,"output",None) or []))
+
+
 def traveler_reply(text):
+    st.session_state.last_web_search_required=requires_web_search(text)
+    st.session_state.last_web_search_used=False
     key=secret("OPENAI_API_KEY")
     if not key or OpenAI is None:
         return fallback(text)["assistant_text"]
@@ -594,9 +608,12 @@ def traveler_reply(text):
                     "user_location":{"type":"approximate","country":"KR"},
                 }
             ],
-            tool_choice="auto",
+            tool_choice="required" if st.session_state.last_web_search_required else "auto",
             input=json.dumps(context,ensure_ascii=False),
         )
+        st.session_state.last_web_search_used=response_searched_web(response)
+        if st.session_state.last_web_search_required and not st.session_state.last_web_search_used:
+            raise RuntimeError("required web search was not executed")
         answer=response.output_text.strip()
         if not answer:
             raise ValueError("empty traveler response")
@@ -615,15 +632,20 @@ def traveler_reply(text):
                         "user_location":{"type":"approximate","country":"KR"},
                     }
                 ],
-                tool_choice="auto",
+                tool_choice="required" if st.session_state.last_web_search_required else "auto",
                 input=json.dumps(context,ensure_ascii=False),
             )
+            st.session_state.last_web_search_used=response_searched_web(response)
+            if st.session_state.last_web_search_required and not st.session_state.last_web_search_used:
+                raise RuntimeError("required web search was not executed")
             answer=response.output_text.strip()
             if answer:
                 return answer
         except Exception:
             pass
         st.toast(f"AI 안내 호출 실패 — 규칙 기반 응답: {type(e).__name__}")
+        if st.session_state.last_web_search_required:
+            return "현재 실시간 검색을 완료하지 못했습니다. 최신 영업·요금·예약 정보는 확인되지 않아 확정해서 안내할 수 없습니다."
         return fallback(text)["assistant_text"]
 
 def observe_turn(text, assistant_text):
