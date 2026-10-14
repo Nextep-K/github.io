@@ -545,6 +545,7 @@ def process_user_turn(prompt, input_mode="text", occurred_at=None):
     assistant_text=traveler_reply(prompt)
     assistant_completed_at=now_iso()
     result=observe_turn(prompt,assistant_text)
+    event_start=len(st.session_state.events)
     apply_result(result,user_occurred_at=occurred_at,
                  assistant_occurred_at=assistant_completed_at,
                  event_location=location_at_input)
@@ -559,7 +560,8 @@ def process_user_turn(prompt, input_mode="text", occurred_at=None):
         "input_mode":input_mode,
         "user_message":prompt,
         "assistant_message":answer,
-        "events":result.get("events") or [],
+        "events":list(st.session_state.events[event_start:]),
+        "observer_events":result.get("events") or [],
         "journey":dict(st.session_state.journey),
         "location":location_at_input,
         "rhythm_signals":list(st.session_state.journey.get("rhythm_signals",[])[-5:]),
