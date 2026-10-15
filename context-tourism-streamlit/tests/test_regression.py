@@ -32,6 +32,30 @@ class PilotRegressionTests(unittest.TestCase):
         fn = isolated("now_iso")["now_iso"]
         self.assertTrue(fn().endswith("+09:00"))
 
+    def test_voice_command_input_defaults_to_on(self):
+        self.assertIn('"voice_input_enabled":True', SOURCE)
+        self.assertIn('disabled=not st.session_state.voice_input_enabled', SOURCE)
+        self.assertIn('key="voice_input_mode_toggle"', SOURCE)
+
+    def test_voice_input_off_command_does_not_modify_rendered_widget(self):
+        ss=SimpleNamespace(
+            voice_input_enabled=True,
+            voice_input_toggle_pending=False,
+            messages=[{"role":"assistant","content":"안녕하세요."}],
+        )
+        st=SimpleNamespace(session_state=ss, toast=lambda message: None)
+        fn=isolated("handle_voice_control_command", overrides={
+            "st":st,
+            "speak_text_browser":lambda message: None,
+        })["handle_voice_control_command"]
+        self.assertTrue(fn("음성 입력 꺼"))
+        self.assertFalse(ss.voice_input_enabled)
+        self.assertTrue(ss.voice_input_toggle_pending)
+        self.assertFalse(hasattr(ss,"voice_input_mode_toggle"))
+        self.assertTrue(fn("음성 입력 켜"))
+        self.assertTrue(ss.voice_input_enabled)
+        self.assertTrue(ss.voice_input_toggle_pending)
+
     def test_price_mentions_are_not_transactions(self):
         fn = isolated("parse_money")["parse_money"]
         self.assertEqual(fn("주차 요금이 6,000원인가?"), 0)
