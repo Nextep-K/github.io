@@ -1,4 +1,4 @@
-# Context Tourism Pilot — Streamlit v0.9
+# Context Tourism Pilot — Streamlit v0.9.1
 
 ## Deployment coordinates
 - Repository: `Nextep-K/github.io`
@@ -14,10 +14,21 @@
 - User interaction occurrence time, recorded time, and associated location
 - Meal, rest, fatigue, and toilet cues as *situational signals* (not stable traits)
 - Optional on-demand web search for current travel information
+- **Voice command input mode defaults to ON each time the app session starts**; users can turn it OFF with the UI toggle or the spoken command "음성 입력 꺼". It can be re-enabled using the UI or text command "음성 입력 켜".
+- Input mode and voice read-aloud output are separate preferences. Voice input ON does **not** change the voice read-aloud setting.
 - Voice recording/transcription and optional browser TTS
 - Browser-local active Journey and history, resume and JSON export
 - Notion Journey, Pilot Raw Log, and Pilot Reports checkpoints when configured
 - Full raw messages are split into Notion-compatible rich-text chunks instead of truncated.
+
+## Voice input behavior
+
+"Voice command input ON" means the microphone **recording control is available**, not that a microphone is continuously recording or listening.
+
+- Streamlit `st.audio_input` starts recording when the user presses the microphone control and submits after the recording is finished.
+- The user must grant browser microphone permission where applicable; this app cannot bypass that prompt or force the microphone on through Streamlit.
+- Voice input OFF disables `st.audio_input`. Typed chat stays available.
+- Continuous, hands-free listening would require a separate consent-based browser microphone component/PWA and device testing, not merely changing this default flag.
 
 ## Important limitations
 - Successful Python CI is **not** proof that a Streamlit deployment is live or mobile-capable.

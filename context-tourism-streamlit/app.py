@@ -152,6 +152,8 @@ def init_state():
         "tts_counter":0,
         "voice_autoplay":False,
         "voice_toggle_sync_pending":False,
+        "voice_input_enabled":True,
+        "voice_input_toggle_pending":False,
         "last_web_search_used":False,
         "last_web_search_required":False,
     }
@@ -483,6 +485,31 @@ def handle_voice_control_command(prompt):
     t=(prompt or "").strip().replace(" ","")
     if not t:
         return False
+
+    # Input mode is ON at startup; users may turn the microphone UI OFF.
+    input_off_terms=("음성명령꺼","음성명령끄기","음성입력꺼","음성입력끄기",
+                     "마이크꺼","마이크끄기","마이크중지","음성입력중지")
+    if any(term in t for term in input_off_terms):
+        st.session_state.voice_input_enabled=False
+        st.session_state.voice_input_toggle_pending=True
+        st.session_state.messages.append({
+            "role":"assistant",
+            "content":"음성명령 입력을 껐습니다. 이후에는 텍스트로 입력하거나 화면에서 음성명령 입력을 다시 켤 수 있습니다."
+        })
+        st.toast("음성명령 입력 OFF")
+        return True
+
+    input_on_terms=("음성명령켜","음성명령켜기","음성입력켜","음성입력켜기",
+                    "마이크켜","마이크켜기","음성입력시작")
+    if any(term in t for term in input_on_terms):
+        st.session_state.voice_input_enabled=True
+        st.session_state.voice_input_toggle_pending=True
+        st.session_state.messages.append({
+            "role":"assistant",
+            "content":"음성명령 입력을 켰습니다. 마이크를 누르고 말씀하세요."
+        })
+        st.toast("음성명령 입력 ON")
+        return True
 
     one_shot_terms=("읽어줘","소리내서읽어줘","답변읽어줘","마지막답변읽어줘")
     if any(term in t for term in one_shot_terms) and not any(term in t for term in ("이제부터","계속","항상","자동")):
@@ -859,7 +886,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9.1")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -896,14 +923,24 @@ with chat_tab:
         st.session_state.pending_tts=None
         speak_text_browser(pending)
 
-    st.caption("음성으로 말하거나 아래 입력창에 직접 입력할 수 있습니다.")
+    st.caption("음성명령 입력은 앱 시작 시 기본 ON입니다. OFF를 선택하면 녹음 기능이 비활성화됩니다.")
+    if st.session_state.pop("voice_input_toggle_pending",False):
+        # Synchronize a spoken command *before* the Streamlit widget is created.
+        st.session_state["voice_input_mode_toggle"]=bool(st.session_state.voice_input_enabled)
+    st.session_state.voice_input_enabled=st.toggle(
+        "음성명령 입력",
+        value=bool(st.session_state.voice_input_enabled),
+        key="voice_input_mode_toggle",
+        help="기본 ON. 실제 녹음은 마이크 버튼을 눌러 시작하며, OFF 시 녹음할 수 없습니다.",
+    )
     voice_cols=st.columns([3,1])
     with voice_cols[0]:
         audio_value=st.audio_input(
             "마이크로 질문",
             sample_rate=16000,
             key="voice_input",
-            help="마이크를 누르고 말한 뒤 녹음을 마치면 자동으로 질문으로 전송합니다.",
+            help="음성명령 입력이 ON일 때 마이크를 누르고 말한 뒤 녹음을 마치면 질문으로 전송합니다.",
+            disabled=not st.session_state.voice_input_enabled,
         )
     with voice_cols[1]:
         if st.session_state.pop("voice_toggle_sync_pending",False):
@@ -919,7 +956,7 @@ with chat_tab:
         if st.button("🔊 답변 다시 듣기",key="replay_answer",use_container_width=True):
             speak_text_browser(st.session_state.messages[-1].get("content",""))
 
-    if audio_value is not None:
+    if st.session_state.voice_input_enabled and audio_value is not None:
         audio_bytes=audio_value.getvalue()
         digest=hashlib.sha256(audio_bytes).hexdigest() if audio_bytes else None
         if digest and digest!=st.session_state.get("last_audio_digest"):
