@@ -150,6 +150,7 @@ def init_state():
         "journey_history":[],
         "selected_history_id":None,
         "last_audio_digest":None,
+        "voice_recorder_generation":0,
         "pending_tts":None,
         "tts_counter":0,
         "voice_autoplay":False,
@@ -460,11 +461,52 @@ def transcribe_audio(audio_value):
         st.toast(f"음성 인식 실패: {type(e).__name__}")
         return ""
 
+# A readable answer can contain markdown links or bare URLs. Keep the
+# on-screen answer unchanged; only prepare a separate narration transcript.
+SPEECH_URL_RE=re.compile(
+    r"https?://[^\\s<>\\])}]+|www\\.[^\\s<>\\])}]+|"
+    r"(?<![\\w@])(?:[a-z0-9-]+\\.)+(?:com|org|net|gov|edu|kr|io|co\\.kr|go\\.kr)"
+    r"(?:/[^\\s<>\\])}]+)?",re.IGNORECASE
+)
+
+def prepare_speech_text(text_value):
+    original=str(text_value or "")
+    if not original.strip():
+        return ""
+    had_url=bool(SPEECH_URL_RE.search(original))
+    # A markdown hyperlink keeps its human-readable label but not the URL.
+    spoken=re.sub(
+        r"\\[([^\\]]+)\\]\\(\\s*(?:https?://|www\\.)[^)\\s]+\\s*\\)",
+        lambda match: "참고 링크" if SPEECH_URL_RE.fullmatch(match.group(1).strip()) else match.group(1).strip(),
+        original,
+        flags=re.IGNORECASE,
+    )
+    spoken=SPEECH_URL_RE.sub("",spoken)
+    spoken=re.sub(r"\\(\\s*\\)", "", spoken)
+    spoken=re.sub(r"(?m)^\\s{0,3}(?:#{1,6}\\s+|[-*]\\s+|\\d+[.)]\\s+)", "", spoken)
+    spoken=re.sub(r"[>*_`]+", "", spoken)
+    spoken=re.sub(r"[ \\t]+", " ", spoken)
+    spoken=re.sub(r" *\\n *", "\\n", spoken).strip()
+    if had_url and spoken:
+        spoken+=("\\n" if not spoken.endswith((".","다.","요.","!","?")) else " ")+"참고 링크는 화면에서 확인할 수 있습니다."
+    return spoken[:3000]
+
+
+def reset_voice_recorder():
+    # st.audio_input has no public clear() operation. A new widget key
+    # discards the completed recording on the next rerun without touching
+    # a widget's read-only Session State value.
+    st.session_state.voice_recorder_generation=int(
+        st.session_state.get("voice_recorder_generation",0)
+    )+1
+    st.session_state.last_audio_digest=None
+
+
 def speak_text_browser(text_value):
-    if not text_value:
+    safe_text=prepare_speech_text(text_value)
+    if not safe_text:
         return
     st.session_state.tts_counter=int(st.session_state.get("tts_counter",0))+1
-    safe_text=str(text_value)[:3000]
     js=f"""
     (() => {{
       if (!('speechSynthesis' in window)) return 'unsupported';
@@ -888,7 +930,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9.1")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9.2")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -936,7 +978,7 @@ with chat_tab:
         audio_value=st.audio_input(
             "마이크로 질문",
             sample_rate=16000,
-            key="voice_input",
+            key=f"voice_input_{st.session_state.voice_recorder_generation}",
             help="음성명령 입력이 ON일 때 마이크를 누르고 말한 뒤 녹음을 마치면 질문으로 전송합니다.",
             disabled=not st.session_state.voice_input_enabled,
         )
@@ -963,6 +1005,9 @@ with chat_tab:
             with st.spinner("음성을 듣고 있습니다…"):
                 voice_text=transcribe_audio(audio_value)
             if voice_text:
+                # Reset after a completed recording, before any rerun. This
+                # also clears old recorder error/retry panels on mobile.
+                reset_voice_recorder()
                 st.toast(f"음성 인식: {voice_text}")
                 if handle_voice_control_command(voice_text):
                     persist_browser_store()
