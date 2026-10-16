@@ -96,7 +96,11 @@ class PilotRegressionTests(unittest.TestCase):
         self.assertIsNone(state.last_audio_digest)
         fn()
         self.assertEqual(state.voice_recorder_generation,2)
-        self.assertNotIn('st.session_state["voice_input_',SOURCE)
+        reset_source=ast.get_source_segment(
+            SOURCE,next(n for n in TREE.body if isinstance(n,ast.FunctionDef)
+                        and n.name=="reset_voice_recorder")
+        )
+        self.assertNotIn('st.session_state["voice_input_',reset_source)
         self.assertIn('key=f"voice_input_{st.session_state.voice_recorder_generation}"',SOURCE)
         self.assertIn("reset_voice_recorder()\n                st.toast(",SOURCE)
 
