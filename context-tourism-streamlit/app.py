@@ -26,6 +26,8 @@ st.markdown("""
 div[data-testid="stMetric"]{background:#1b1f27;padding:10px;border-radius:12px;border:1px solid #303641}
 div[data-testid="stMetric"] [data-testid="stMetricLabel"],
 div[data-testid="stMetric"] [data-testid="stMetricValue"]{color:#f7f8fa!important}
+/* Keep the command input above the conversation while scrolling the history. */
+.st-key-journey_command_bar{position:sticky;top:3.75rem;z-index:25;background:var(--background-color,#fff);padding:0.25rem 0 0.35rem}
 </style>
 """, unsafe_allow_html=True)
 
@@ -912,10 +914,6 @@ with chat_tab:
     else:
         st.caption("위치 권한을 허용하면 현재 위치를 Journey Context에 연결합니다.")
 
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
     # Speak only replies that came from a voice turn. Browsers can still block
     # automatic audio, so a replay button is provided below.
     if st.session_state.get("pending_tts") and st.session_state.get("voice_autoplay",False):
@@ -974,13 +972,22 @@ with chat_tab:
                     st.session_state.pending_tts=answer
                 st.rerun()
 
-    prompt=st.chat_input("여행 중 궁금한 것을 말하세요")
+    # Nested container renders st.chat_input inline, not pinned at the screen bottom.
+    # It stays above the answer history; CSS keeps the command bar in view.
+    with st.container(key="journey_command_bar"):
+        prompt=st.chat_input("여행 중 궁금한 것을 말하세요")
     if prompt:
         if handle_voice_control_command(prompt):
             persist_browser_store()
             st.rerun()
         process_user_turn(prompt,input_mode="text")
         st.rerun()
+
+    # Newest assistant reply comes first, directly under the command input.
+    # Past turns move down; source messages remain chronological for Observer/Notion.
+    for msg in reversed(st.session_state.messages):
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
 
 with history_tab:
     if not admin_access_gate("history"):

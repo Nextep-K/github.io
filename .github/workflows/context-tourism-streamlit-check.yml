@@ -32,6 +32,12 @@ jobs:
         run: python -c "import streamlit, openai, notion_client, streamlit_js_eval; print('imports ok')"
       - name: Regression tests
         run: python -m unittest discover -s context-tourism-streamlit/tests -p "test_*.py" -v
+      - name: Install Playwright for local mobile UI verification
+        run: |
+          pip install "playwright>=1.55,<2"
+          python -m playwright install chromium
+      - name: Browser layout test (390px screen, 2 conversation turns)
+        run: python context-tourism-streamlit/tests/test_chat_layout_browser.py
       - name: Public Streamlit deployment probe (non-blocking)
         continue-on-error: true
         run: python context-tourism-streamlit/tests/probe_deployment.py
