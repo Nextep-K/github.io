@@ -12,7 +12,6 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from playwright.sync_api import sync_playwright, expect
 
 APP = Path(__file__).resolve().parents[1] / "app.py"
 BASE = "http://127.0.0.1:8591/"
@@ -31,6 +30,8 @@ def wait_for_server(timeout=45):
 
 
 def run():
+    from playwright.sync_api import sync_playwright, expect
+
     server=subprocess.Popen([
         sys.executable,"-m","streamlit","run",str(APP),
         "--server.address","127.0.0.1","--server.port","8591",
