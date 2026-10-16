@@ -77,6 +77,31 @@ def run():
                 first_reply_y=cards.first.bounding_box()["y"]
                 assert command_y<first_reply_y,(command_y,first_reply_y)
 
+                # Verify the replay button starts speech inside its own click
+                # listener (without waiting for a Streamlit server rerun).
+                replay_frames=[fr for fr in page.frames
+                               if fr.locator("#voice-replay").count()==1]
+                assert len(replay_frames)==1, "Expected exactly one replay iframe"
+                replay_frame=replay_frames[0]
+                replay_frame.evaluate("""() => {
+                    window.__replayCalls=[];
+                    Object.defineProperty(window,"speechSynthesis",{
+                        configurable:true,
+                        value:{
+                            cancel:()=>{},
+                            getVoices:()=>[],
+                            speak:(utterance)=>window.__replayCalls.push(utterance.text)
+                        }
+                    });
+                    Object.defineProperty(window,"SpeechSynthesisUtterance",{
+                        configurable:true,
+                        value:class { constructor(text){this.text=text;} }
+                    });
+                }""")
+                replay_frame.locator("#voice-replay").click()
+                spoken=replay_frame.evaluate("() => window.__replayCalls")
+                assert len(spoken)==1 and "출발로 기록했습니다" in spoken[0],spoken
+                print("PASS: replay begins speech in direct browser click handler")
                 print("PASS: real 390px Chromium: input first; latest assistant reply,")
                 print("      latest user, previous assistant, previous user, greeting last")
                 print("PASS: original voice-input and TTS controls remain visible")
