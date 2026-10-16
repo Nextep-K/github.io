@@ -24,6 +24,12 @@ def isolated(*names, overrides=None):
     return scope
 
 
+class SessionStateMock(dict):
+    """A minimal Streamlit Session State stand-in for unit tests."""
+    __getattr__=dict.__getitem__
+    __setattr__=dict.__setitem__
+
+
 class PilotRegressionTests(unittest.TestCase):
     def test_source_compiles(self):
         compile(SOURCE, "app.py", "exec")
@@ -68,7 +74,7 @@ class PilotRegressionTests(unittest.TestCase):
     def test_actual_browser_tts_script_receives_clean_text(self):
         scope=self._speech_scope()
         spoken_commands=[]
-        state=SimpleNamespace(tts_counter=0)
+        state=SessionStateMock(tts_counter=0)
         scope["speak_text_browser"].__globals__.update({
             "st":SimpleNamespace(session_state=state),
             "streamlit_js_eval":lambda **kwargs: spoken_commands.append(kwargs),
@@ -83,7 +89,7 @@ class PilotRegressionTests(unittest.TestCase):
 
     def test_recorder_reset_rotates_widget_key_without_editing_widget(self):
         fn=self._speech_scope()["reset_voice_recorder"]
-        state=SimpleNamespace(voice_recorder_generation=0,last_audio_digest="abc")
+        state=SessionStateMock(voice_recorder_generation=0,last_audio_digest="abc")
         fn.__globals__["st"]=SimpleNamespace(session_state=state)
         fn()
         self.assertEqual(state.voice_recorder_generation,1)
