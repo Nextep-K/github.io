@@ -104,6 +104,35 @@ class PilotRegressionTests(unittest.TestCase):
         self.assertIn('key=f"voice_input_{st.session_state.voice_recorder_generation}"',SOURCE)
         self.assertIn("reset_voice_recorder()\n                st.toast(",SOURCE)
 
+    def test_text_and_voice_replies_both_schedule_speech_when_enabled(self):
+        chat=SOURCE.split("with chat_tab:",1)[1].split("with history_tab:",1)[0]
+        self.assertIn('answer=process_user_turn(prompt,input_mode="text")',chat)
+        self.assertIn('answer=process_user_turn(voice_text,input_mode="voice"',chat)
+        self.assertEqual(chat.count('st.session_state.pending_tts=answer'),2)
+        self.assertIn('if st.session_state.get("voice_autoplay",False):',chat)
+
+    def test_browser_replay_is_bound_to_real_click_handler(self):
+        speech=self._speech_scope()["prepare_speech_text"]
+        captures=[]
+        fake_components=SimpleNamespace(
+            html=lambda markup,**kwargs: captures.append((markup,kwargs))
+        )
+        fn=isolated("render_direct_speech_replay",overrides={
+            "prepare_speech_text":speech,"json":__import__("json"),
+            "components":fake_components,
+        })["render_direct_speech_replay"]
+        fn("세종시입니다. https://smart.sejong.go.kr")
+        self.assertEqual(len(captures),1)
+        markup,kwargs=captures[0]
+        self.assertIn('btn.addEventListener("click"',markup)
+        self.assertIn("synth.speak(speech)",markup)
+        self.assertIn('speech.lang="ko-KR"',markup)
+        self.assertNotIn("smart.sejong.go.kr",markup)
+        self.assertIn("참고 링크는 화면에서 확인할 수 있습니다.",markup)
+        self.assertEqual(kwargs["height"],78)
+        self.assertIn('render_direct_speech_replay(st.session_state.messages[-1]',SOURCE)
+        self.assertNotIn('key="replay_answer"',SOURCE)
+
     def test_chat_input_is_inline_above_newest_first_history(self):
         # Only the display is reversed: raw chronological messages remain untouched.
         chat_section = SOURCE.split("with chat_tab:", 1)[1].split("with history_tab:", 1)[0]

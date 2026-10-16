@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_js_eval import get_geolocation, streamlit_js_eval
 
 try:
@@ -525,6 +526,66 @@ def speak_text_browser(text_value):
         key=f"TTS_{st.session_state.tts_counter}",
     )
 
+def render_direct_speech_replay(text_value):
+    """iOS-compatible retry: speech starts *inside* the browser's click handler.
+
+    The existing automatic voice attempt stays in place. Safari may reject
+    synthetic speech started after a Streamlit rerun, so the traveler can
+    explicitly retry without requiring another server round trip.
+    """
+    spoken=prepare_speech_text(text_value)
+    if not spoken:
+        return
+    payload=json.dumps(spoken,ensure_ascii=False).replace("<",r"\u003c").replace("&",r"\u0026")
+    html=f"""
+    <style>
+      body{{margin:0;font-family:system-ui,-apple-system,sans-serif;background:transparent}}
+      button{{display:block;width:100%;min-height:46px;border:1px solid #c8ccd1;
+              border-radius:10px;background:#fff;color:#202631;font-size:16px;
+              font-weight:500;cursor:pointer}}
+      #speech-status{{font-size:12px;color:#686e77;text-align:center;margin-top:3px}}
+    </style>
+    <button type="button" id="voice-replay">🔊 답변 다시 듣기</button>
+    <div id="speech-status" role="status" aria-live="polite"></div>
+    <script>
+      (() => {{
+        const btn=document.getElementById("voice-replay");
+        const status=document.getElementById("speech-status");
+        let activeSpeech=null;
+        btn.addEventListener("click", () => {{
+          if (!("speechSynthesis" in window) || !window.SpeechSynthesisUtterance) {{
+            status.textContent="이 브라우저는 음성 재생을 지원하지 않습니다.";
+            return;
+          }}
+          try {{
+            const synth=window.speechSynthesis;
+            synth.cancel();
+            const speech=new window.SpeechSynthesisUtterance({payload});
+            speech.lang="ko-KR";
+            speech.rate=1;
+            speech.pitch=1;
+            const voices=synth.getVoices();
+            const koreanVoice=voices.find(v => v.lang.toLowerCase().startsWith("ko"));
+            if(koreanVoice) speech.voice=koreanVoice;
+            speech.onstart=() => {{status.textContent="재생 중";}};
+            speech.onend=() => {{status.textContent="";activeSpeech=null;}};
+            speech.onerror=() => {{
+              status.textContent="음성 재생이 차단됐습니다. iPhone 오디오 설정을 확인해 주세요.";
+              activeSpeech=null;
+            }};
+            activeSpeech=speech;
+            synth.speak(speech);
+            status.textContent="음성 재생 요청됨";
+          }} catch(e) {{
+            status.textContent="음성 재생 요청 실패";
+          }}
+        }});
+      }})();
+    </script>
+    """
+    components.html(html,height=78,scrolling=False)
+
+
 def handle_voice_control_command(prompt):
     t=(prompt or "").strip().replace(" ","")
     if not t:
@@ -930,7 +991,7 @@ def admin_access_gate(key_suffix):
 update_location(get_geolocation())
 
 st.title("Context Tourism Pilot")
-st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9.2")
+st.caption("1인용 관광 Context 관찰·분석 실험 · Streamlit v0.9.3")
 
 j=st.session_state.journey
 a,b,c=st.columns(3)
@@ -993,8 +1054,7 @@ with chat_tab:
         )
 
     if st.session_state.messages and st.session_state.messages[-1].get("role")=="assistant":
-        if st.button("🔊 답변 다시 듣기",key="replay_answer",use_container_width=True):
-            speak_text_browser(st.session_state.messages[-1].get("content",""))
+        render_direct_speech_replay(st.session_state.messages[-1].get("content",""))
 
     if st.session_state.voice_input_enabled and audio_value is not None:
         audio_bytes=audio_value.getvalue()
@@ -1025,7 +1085,9 @@ with chat_tab:
         if handle_voice_control_command(prompt):
             persist_browser_store()
             st.rerun()
-        process_user_turn(prompt,input_mode="text")
+        answer=process_user_turn(prompt,input_mode="text")
+        if st.session_state.get("voice_autoplay",False):
+            st.session_state.pending_tts=answer
         st.rerun()
 
     # Newest assistant reply comes first, directly under the command input.
