@@ -464,9 +464,9 @@ def transcribe_audio(audio_value):
 # A readable answer can contain markdown links or bare URLs. Keep the
 # on-screen answer unchanged; only prepare a separate narration transcript.
 SPEECH_URL_RE=re.compile(
-    r"https?://[^\\s<>\\])}]+|www\\.[^\\s<>\\])}]+|"
-    r"(?<![\\w@])(?:[a-z0-9-]+\\.)+(?:com|org|net|gov|edu|kr|io|co\\.kr|go\\.kr)"
-    r"(?:/[^\\s<>\\])}]+)?",re.IGNORECASE
+    r"https?://[^\s<>()\[\]{}]+|www\.[^\s<>()\[\]{}]+|"
+    r"(?<![\w@])(?:[a-z0-9-]+\.)+(?:com|org|net|gov|edu|kr|io)"
+    r"(?:/[^\s<>()\[\]{}]+)?",re.IGNORECASE
 )
 
 def prepare_speech_text(text_value):
@@ -474,23 +474,23 @@ def prepare_speech_text(text_value):
     if not original.strip():
         return ""
     had_url=bool(SPEECH_URL_RE.search(original))
-    # A markdown hyperlink keeps its human-readable label but not the URL.
+    # Retain a human-readable markdown link label, not its destination.
     spoken=re.sub(
-        r"\\[([^\\]]+)\\]\\(\\s*(?:https?://|www\\.)[^)\\s]+\\s*\\)",
-        lambda match: "참고 링크" if SPEECH_URL_RE.fullmatch(match.group(1).strip()) else match.group(1).strip(),
+        r"\[([^\]]+)\]\(\s*(?:https?://|www\.)[^)\s]+\s*\)",
+        lambda match: ("참고 링크" if SPEECH_URL_RE.fullmatch(match.group(1).strip())
+                       else match.group(1).strip()),
         original,
         flags=re.IGNORECASE,
     )
     spoken=SPEECH_URL_RE.sub("",spoken)
-    spoken=re.sub(r"\\(\\s*\\)", "", spoken)
-    spoken=re.sub(r"(?m)^\\s{0,3}(?:#{1,6}\\s+|[-*]\\s+|\\d+[.)]\\s+)", "", spoken)
-    spoken=re.sub(r"[>*_`]+", "", spoken)
-    spoken=re.sub(r"[ \\t]+", " ", spoken)
-    spoken=re.sub(r" *\\n *", "\\n", spoken).strip()
+    spoken=re.sub(r"\(\s*\)","",spoken)
+    spoken=re.sub(r"(?m)^\s{0,3}(?:#{1,6}\s+|[-*]\s+|\d+[.)]\s+)","",spoken)
+    spoken=re.sub(r"[*_\x60]+","",spoken)
+    spoken=re.sub(r"[ \t]+"," ",spoken)
+    spoken=re.sub(r" *\n *","\n",spoken).strip()
     if had_url and spoken:
-        spoken+=("\\n" if not spoken.endswith((".","다.","요.","!","?")) else " ")+"참고 링크는 화면에서 확인할 수 있습니다."
+        spoken+="\n참고 링크는 화면에서 확인할 수 있습니다."
     return spoken[:3000]
-
 
 def reset_voice_recorder():
     # st.audio_input has no public clear() operation. A new widget key
