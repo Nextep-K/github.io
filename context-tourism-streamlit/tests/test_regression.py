@@ -32,6 +32,68 @@ class PilotRegressionTests(unittest.TestCase):
         fn = isolated("now_iso")["now_iso"]
         self.assertTrue(fn().endswith("+09:00"))
 
+    def _speech_scope(self):
+        # Compile the exact production regex constant and functions in isolation,
+        # without importing the Streamlit app's rendering side effects.
+        assignment=next(node for node in TREE.body if (
+            isinstance(node,ast.Assign)
+            and any(isinstance(t,ast.Name) and t.id=="SPEECH_URL_RE"
+                    for t in node.targets)
+        ))
+        globals_={"re":re}
+        exec(compile(ast.Module(body=[assignment],type_ignores=[]),"app.py","exec"),globals_)
+        return isolated("prepare_speech_text","speak_text_browser","reset_voice_recorder",
+                        overrides=globals_)
+
+    def test_narration_omits_raw_urls_and_says_link_once(self):
+        speech=self._speech_scope()["prepare_speech_text"]
+        source=("**천안** 구간: 독립기념관 참고. (seobuk.cheonan.go.kr)\n"
+                "- 세종 구간: [세종 명소](https://smart.sejong.go.kr/tour)\n"
+                "- 확인: https://www.example.com/path?ref=abc")
+        spoken=speech(source)
+        self.assertIn("독립기념관",spoken)
+        self.assertIn("세종 명소",spoken)
+        for part in ("https", "seobuk.cheonan.go.kr", "smart.sejong.go.kr",
+                     "www.example.com","example.com/path"):
+            self.assertNotIn(part,spoken)
+        self.assertEqual(spoken.count("참고 링크는 화면에서 확인할 수 있습니다."),1)
+        self.assertEqual(source.count("https"),2)  # on-screen/raw original unchanged
+
+    def test_narration_preserves_normal_answers(self):
+        speech=self._speech_scope()["prepare_speech_text"]
+        self.assertEqual(speech("월정사에서 약 20분 정도 머물러 보세요."),
+                         "월정사에서 약 20분 정도 머물러 보세요.")
+        self.assertEqual(speech(""),"")
+
+    def test_actual_browser_tts_script_receives_clean_text(self):
+        scope=self._speech_scope()
+        spoken_commands=[]
+        state=SimpleNamespace(tts_counter=0)
+        scope["speak_text_browser"].__globals__.update({
+            "st":SimpleNamespace(session_state=state),
+            "streamlit_js_eval":lambda **kwargs: spoken_commands.append(kwargs),
+            "json":__import__("json"),
+        })
+        scope["speak_text_browser"]("세종시입니다. https://smart.sejong.go.kr")
+        self.assertEqual(state.tts_counter,1)
+        self.assertEqual(len(spoken_commands),1)
+        js=spoken_commands[0]["js_expressions"]
+        self.assertIn("참고 링크는 화면에서 확인",js)
+        self.assertNotIn("smart.sejong.go.kr",js)
+
+    def test_recorder_reset_rotates_widget_key_without_editing_widget(self):
+        fn=self._speech_scope()["reset_voice_recorder"]
+        state=SimpleNamespace(voice_recorder_generation=0,last_audio_digest="abc")
+        fn.__globals__["st"]=SimpleNamespace(session_state=state)
+        fn()
+        self.assertEqual(state.voice_recorder_generation,1)
+        self.assertIsNone(state.last_audio_digest)
+        fn()
+        self.assertEqual(state.voice_recorder_generation,2)
+        self.assertNotIn('st.session_state["voice_input_',SOURCE)
+        self.assertIn('key=f"voice_input_{st.session_state.voice_recorder_generation}"',SOURCE)
+        self.assertIn("reset_voice_recorder()\n                st.toast(",SOURCE)
+
     def test_chat_input_is_inline_above_newest_first_history(self):
         # Only the display is reversed: raw chronological messages remain untouched.
         chat_section = SOURCE.split("with chat_tab:", 1)[1].split("with history_tab:", 1)[0]
