@@ -32,6 +32,29 @@ class PilotRegressionTests(unittest.TestCase):
         fn = isolated("now_iso")["now_iso"]
         self.assertTrue(fn().endswith("+09:00"))
 
+    def test_chat_input_is_inline_above_newest_first_history(self):
+        # Only the display is reversed: raw chronological messages remain untouched.
+        chat_section = SOURCE.split("with chat_tab:", 1)[1].split("with history_tab:", 1)[0]
+        self.assertIn('with st.container(key="journey_command_bar"):', chat_section)
+        self.assertIn('prompt=st.chat_input("여행 중 궁금한 것을 말하세요")', chat_section)
+        self.assertIn('for msg in reversed(st.session_state.messages):', chat_section)
+        self.assertNotIn("for msg in st.session_state.messages:", chat_section)
+        self.assertLess(chat_section.index('prompt=st.chat_input('),
+                        chat_section.index('for msg in reversed('))
+        # Processing and original event / Notion order must remain chronological.
+        self.assertIn('st.session_state.messages.append({"role":"user","content":prompt})', SOURCE)
+        self.assertIn('st.session_state.messages.append({"role":"assistant","content":answer})', SOURCE)
+
+    def test_command_stays_at_top_when_scrolling(self):
+        self.assertIn(".st-key-journey_command_bar{position:sticky;", SOURCE)
+
+    def test_voice_and_text_submission_handlers_still_operate(self):
+        chat_section = SOURCE.split("with chat_tab:", 1)[1].split("with history_tab:", 1)[0]
+        self.assertIn('process_user_turn(voice_text,input_mode="voice"', chat_section)
+        self.assertIn('process_user_turn(prompt,input_mode="text")', chat_section)
+        self.assertIn('speak_text_browser(pending)', chat_section)
+        self.assertIn('key="voice_input_mode_toggle"', chat_section)
+
     def test_voice_command_input_defaults_to_on(self):
         self.assertIn('"voice_input_enabled":True', SOURCE)
         self.assertIn('disabled=not st.session_state.voice_input_enabled', SOURCE)
